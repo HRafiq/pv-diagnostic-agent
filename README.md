@@ -21,8 +21,9 @@ causes, says so and names the cheap test that would.
 The output is one of three instructions: **send someone, schedule something, or
 do nothing.** The third is the one nobody sells and often the most valuable.
 
-> **Status: step 0 of 13.** Foundations only — schemas, clock, trace writer,
-> config, dashboard shell. Nothing is measured yet. See *Build progress* below.
+> **Status: steps 0–3 of 13 complete.** Real data ingested, physics validated,
+> fault injector and evaluation harness running with a rules baseline scored.
+> The agent itself arrives at step 4. See *Build progress* below.
 
 ---
 
@@ -72,11 +73,14 @@ cp .env.example .env          # ANTHROPIC_API_KEY needed only for agent nodes
 ```
 
 ```bash
-pytest                                    # 105 tests
+pytest                                    # 191 tests
 ruff check . && mypy src eval simulator   # lint + types
 
 python watcher.py status                  # clock, models, config
 python watcher.py run --until 2019-06-30 --step 1D
+
+python -m src.data.cli ingest --system 4902 --years 2016 2017
+python -m eval.runner build && python -m eval.runner run --engine rules
 
 uvicorn dashboard.app:app --reload        # http://127.0.0.1:8000
 ```
@@ -121,10 +125,10 @@ the dashboard reads.
 | Step | Deliverable | State |
 | ---- | ----------- | ----- |
 | 0 | Skeleton, config, schemas, injected clock, JSONL trace writer, `CLAUDE.md` | **done** |
-| 1 | Data ingestion + pvlib ModelChain. Dashboard Tab 1 live | next |
-| 2 | Physics-level fault injector + Tab 4. First 15 golden cases | |
-| 3 | Evaluation harness — runner, metrics, tuning/held-back splits, Tab 5 | |
-| 4 | Vertical slice: plain-Python loop, 10 golden questions end to end, Tab 3 | |
+| 1 | PVDAQ ingestion + expectation model. Dashboard Tab 1 live | **done** |
+| 2 | Physics-level fault injector, 7 injectors, 20 golden cases | **done** |
+| 3 | Evaluation harness — runner, metrics, agency metrics, rules baseline | **done** |
+| 4 | Vertical slice: plain-Python loop, 10 golden questions end to end, Tab 3 | next |
 | 5 | Full atomic tool set + domain-knowledge YAML. Golden set to 60-80 | |
 | 6 | Critic with structured verdict, iteration cap, not-enough-evidence path | |
 | 7 | Rules-engine baseline + first rules-vs-agent comparison | |
@@ -141,21 +145,33 @@ Each step is gated: it stops for review before the next one starts.
 
 ## Data
 
-Public data only. **DKASC** (Alice Springs, Australia) is the primary dataset —
-about ten years at five-minute resolution, ~30 arrays sharing one weather
-station, desert siting with real soiling and 45 °C ambient. **NREL PVDAQ** is
-secondary, and the best chance at real *labelled* fault events.
+Public data only. The primary dataset is **NREL PVDAQ system 4902,
+NIST_Ground_1** (Gaithersburg MD) — 270.7 kW, 1152 Sharp NU-U235F2 modules on a
+fixed 20° / due-south mount, 2016–2017 at 15-minute resolution.
 
-Datasets are never committed. Ingest scripts download into a gitignored
-`data/raw/` and a manifest with SHA-256 checksums is committed instead, so the
-dataset is reproducible without shipping it.
+    python -m src.data.cli ingest --system 4902 --years 2016 2017
 
-**Known limitation.** Essentially no public dataset carries per-MPPT DC string
-telemetry, so `per_mppt_current_balance` and the inverter-level comparisons are
-validated on a simulated multi-string plant driven by real measured weather. The
-simulator and the expectation model are deliberately different stacks — if they
-shared a configuration, every injected deficit would be trivially detectable and
-the accuracy figure would be meaningless.
+It carries **7 per-combiner DC current channels**, which is unusual and load
+bearing: `per_mppt_current_balance` and the string-vs-array comparisons run on
+real measurements rather than simulation. Plus POA irradiance, module and
+ambient temperature, wind speed, and both AC and DC power.
+
+Datasets are never committed. The ingest downloads into a gitignored `data/raw/`
+and writes a manifest with a SHA-256 per source file, the resolved channel map,
+and the timezone finding — so the dataset is reproducible without shipping it.
+
+Three things the ingest does that are easy to get wrong:
+
+- **Channel resolution is by physical plausibility, not name.** This system
+  exposes three POA channels and only one reads in W/m²; the others are ~115×
+  smaller. Picking on name alone makes every performance ratio wrong by that
+  factor while still looking plausible. It also rejected a wind channel reading
+  292 m/s.
+- **The logger's timezone is recovered, not assumed.** Every half-hour offset is
+  scored against a modelled clear-sky curve. NIST 4902 came back UTC−5 at
+  r = 0.997 — Eastern *Standard* Time year round, no daylight saving.
+- **Faults are injected onto measured series, never onto a simulated plant.**
+  There is no generating model for the expectation model to be circular with.
 
 ---
 

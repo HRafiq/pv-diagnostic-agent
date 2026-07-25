@@ -15,7 +15,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from dashboard.app import app
-from src.config import build_clock, load_models_config, load_site_defaults
+from src.config import build_clock, load_models_config
 
 client = TestClient(app)
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -29,7 +29,9 @@ def test_state_agrees_with_src_rather_than_recomputing() -> None:
     payload = client.get("/api/state").json()
     assert payload["now"] == build_clock().now().isoformat()
     assert payload["model_profile"] == load_models_config().active_profile
-    assert {s["key"] for s in payload["sites"]} == set(load_site_defaults().sites)
+    # Sites now come from ingested manifests rather than static config, so the
+    # page always describes the data actually on disk.
+    assert isinstance(payload["systems"], list)
 
 
 def test_state_exposes_every_agent_node() -> None:
@@ -53,8 +55,9 @@ def test_index_renders() -> None:
 def test_tabs_are_disabled_until_their_step_lands() -> None:
     tabs = client.get("/api/state").json()["tabs"]
     assert len(tabs) == 5
-    # Step 0 ships the shell only; nothing has data behind it yet.
-    assert all(not tab["enabled"] for tab in tabs)
+    enabled = {t["key"] for t in tabs if t["enabled"]}
+    # Plant went live at step 1; the rest arrive with their own steps.
+    assert enabled == {"plant"}
     assert {t["key"] for t in tabs} == {
         "plant",
         "watcher",

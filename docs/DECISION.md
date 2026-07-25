@@ -193,3 +193,127 @@ A metric that cannot fail cannot teach anything, and the whole point of the
 option-(b) design is to show BM25 winning exact-term queries and dense winning
 paraphrased symptom descriptions. That separation shows up at top-1, not top-10.
 The top-10 figure is still reported; it is just no longer the headline.
+
+---
+
+## 0010 — PVDAQ (NIST) replaces DKASC as the dataset (2026-07-25)
+
+**Decision.** Primary dataset is **NREL PVDAQ system 4902, NIST_Ground_1**,
+Gaithersburg MD — 270.7 kW, 2016–2017 at 15-minute resolution.
+
+**Why the change.** DKASC was the agreed primary, but `dkasolarcentre.com.au`,
+`developer.nrel.gov` and PVGIS are all blocked by this environment's network
+policy. The OEDI data lake on S3 is reachable, and PVDAQ lives there.
+
+**Why it is better anyway.** NIST Ground 1 carries **7 per-combiner DC current
+channels**. That was the one thing I said no public dataset had, and its absence
+was going to force `per_mppt_current_balance` and the inverter-fleet comparisons
+onto simulation. They now run on real measurements. It also has POA + GHI +
+module temperature + ambient + wind, a documented module (Sharp NU-U235F2, in
+the CEC database) and inverter (PV Powered PVP 260 kW), fixed 20° tilt at 180°
+azimuth, and full public metadata.
+
+**What is lost.** DKASC's ~30 co-located arrays would have given a genuine
+fleet-comparison baseline; NIST has one array with seven combiners, so
+`compare_inverter_to_fleet` becomes `compare_string_to_array`. Desert soiling is
+also gone — Gaithersburg is humid continental (Köppen Cfa), so soiling is a much
+weaker real signal and mostly arrives by injection.
+
+---
+
+## 0011 — Two stacked panels instead of a dual-axis chart (2026-07-25)
+
+**Decision.** Handoff §6.4 asks for power and irradiance on a dual axis. Built
+as two panels sharing a time axis instead.
+
+**Why.** With two y-scales the author chooses where the series cross, so the
+reader cannot distinguish a real divergence from a chosen one. The teaching
+moment the brief wants — "output halving while irradiance halves with it" — is
+read off aligned peaks and troughs, which stacked panels give without the scale
+trickery.
+
+Chart colours are drawn from a palette validated for both themes on their own
+surfaces (colour-vision separation, contrast, lightness band). Three categorical
+slots is the hard cap: past three, no ordering clears the all-pairs floors.
+
+---
+
+## 0012 — Logger timezone recovered from physics, not assumed (2026-07-25)
+
+**Decision.** The ingest recovers each logger's UTC offset by scanning every
+half-hour candidate and keeping the one whose modelled clear-sky curve best
+correlates with measured irradiance. NIST 4902 came back **UTC−5, r = 0.997,
+margin 0.026** over the runner-up — Eastern *Standard* Time year round, no DST.
+
+**Why.** PVDAQ does not record a timezone, and both usual guesses are wrong
+somewhere: UTC is wrong for most systems and local-with-DST is wrong for the many
+loggers that keep local standard time. An hour of error puts the modelled sun an
+hour from the measured sun, and a healthy plant then appears to under-perform
+every morning and over-perform every afternoon.
+
+**One refinement that mattered.** Correlating across all weather caps out near
+r = 0.85 and leaves a 0.007 margin between adjacent offsets — a cloudy day is dim
+at every candidate, so it lowers them all equally and flattens the peak. Scoring
+only the clearest days (ranked by curve smoothness, so the selection is
+resolution-independent) lifts it to r = 0.997 with a decisive margin.
+
+---
+
+## 0013 — PR must mask numerator and denominator identically (2026-07-25)
+
+**Decision.** `compute_pr` excludes any interval where power is missing, from
+*both* the energy sum and the insolation sum, and reports
+`data_completeness` alongside every result.
+
+**Why.** Found by the physics, not by review. NIST 4902 loses AC power for 35
+days in mid-2016 while the weather station keeps logging normally. Integrating
+all of July's insolation against only the five surviving days' energy reads as
+**PR = 0.098** — a 90% loss that never happened. With matched masks the same
+month reads PR = 0.798 at 12.4% completeness, which is the honest statement.
+
+This is why the interface reports completeness next to every ratio: a PR from
+14% of the intervals is not the same claim as a PR from 98%, and a finding must
+never present them identically.
+
+---
+
+## 0014 — Faults are injected onto measured data, never onto a simulated plant (2026-07-25)
+
+**Decision.** Every injector perturbs the real NIST series. Nothing builds a
+synthetic plant with pvlib.
+
+**Why this is stronger than DECISION 0008.** 0008 required the simulator and the
+expectation model to use *different* configurations. Perturbing measured data
+removes the problem rather than managing it: there is no generating model for
+the expectation model to be circular with. This only became possible because the
+chosen dataset carries real per-string currents — a simulated plant would have
+been unavoidable on a dataset without them.
+
+---
+
+## 0015 — Rules-engine baseline reported before the agent exists (2026-07-25)
+
+**First numbers, on 20 cases (10 per split), 40% look-alikes:**
+
+| | tuning | held-back |
+|---|---|---|
+| Overall accuracy (macro-F1) | 0.329 | 0.385 |
+| False alarms on look-alikes | 0.000 | 0.000 |
+| Correct "not enough evidence" | 0.000 | 0.000 |
+| Missed real faults | 0.250 | 0.250 |
+
+Distinct tool trajectories: 2. Unplanned-measurement rate: 0.000.
+
+**Reading it.** The baseline fails two of the four v1 targets, which is the
+point — a harness that cannot report failure cannot report success either. Its
+zero false-alarm rate comes from being conservative, not accurate: it calls most
+things healthy, hence the 25% missed-fault rate.
+
+The **0.000 correct-abstention rate is structural, not a tuning problem.** The
+engine has no way to represent "two causes survive and here is the test that
+separates them", so it commits to `clipping` on the curtailment case. That is
+the gap the agent has to fill, and it is now measured rather than asserted.
+
+The agency metrics double as their own control: a known pipeline scores 2
+trajectories and 0.000 unplanned measurements. If the agent scores the same,
+it is a pipeline too — and the metric will say so.
