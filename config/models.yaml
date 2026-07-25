@@ -1,0 +1,71 @@
+# LLM model per agent node.
+#
+# There is no `temperature` here on purpose. temperature/top_p/top_k were
+# REMOVED on Claude Opus 5, Sonnet 5, Opus 4.8 and Opus 4.7 — sending any of
+# them returns HTTP 400. Reasoning depth is steered with `effort` instead.
+# See docs/DECISION.md#0004.
+#
+# Profiles let the cost/quality experiment in eval §5.4 be a config change
+# rather than a code change. Select with PV_MODEL_PROFILE in .env.
+
+active_profile: default
+
+# Published list prices, USD per million tokens. Used by the cost accounting in
+# src/trace/ — the agent never sees these.
+pricing:
+  claude-opus-5:      { input: 5.00, output: 25.00 }
+  claude-sonnet-5:    { input: 3.00, output: 15.00, note: "intro $2.00/$10.00 through 2026-08-31" }
+  claude-haiku-4-5:   { input: 1.00, output: 5.00 }
+
+profiles:
+
+  # Cost-tuned. The target is a median <= $0.15 per question (eval §5.6), which
+  # is only reachable with prompt caching on the stable system + tool-schema
+  # prefix, so `cache_system_prompt` is on everywhere it pays for itself.
+  default:
+    planner:
+      model: claude-sonnet-5
+      effort: high            # enumerating causes is the reasoning-heavy step
+      thinking: adaptive
+      max_tokens: 8000
+      cache_system_prompt: true
+    router:
+      model: claude-haiku-4-5 # called most often, decides least
+      effort: null            # NOTE: Haiku 4.5 rejects `effort` — must stay null
+      thinking: null          # Haiku 4.5 uses legacy budget_tokens; off is fine
+      max_tokens: 1500
+      cache_system_prompt: true
+    synthesizer:
+      model: claude-sonnet-5
+      effort: high
+      thinking: adaptive
+      max_tokens: 8000
+      cache_system_prompt: true
+    critic:
+      model: claude-sonnet-5  # a weak critic is worse than no critic (§3.5)
+      effort: high
+      thinking: adaptive
+      max_tokens: 6000
+      cache_system_prompt: true
+
+  # Upper bound on quality, for the cost/quality frontier in docs/FINDINGS.md.
+  # Expect roughly 3-5x the cost of `default`.
+  quality:
+    planner:     { model: claude-opus-5, effort: xhigh, thinking: adaptive, max_tokens: 16000, cache_system_prompt: true }
+    router:      { model: claude-sonnet-5, effort: low, thinking: disabled, max_tokens: 1500, cache_system_prompt: true }
+    synthesizer: { model: claude-opus-5, effort: xhigh, thinking: adaptive, max_tokens: 16000, cache_system_prompt: true }
+    critic:      { model: claude-opus-5, effort: high,  thinking: adaptive, max_tokens: 8000,  cache_system_prompt: true }
+
+# Hard ceilings, enforced client-side before the call is made. A run that trips
+# one of these fails loudly rather than quietly costing money.
+limits:
+  max_llm_calls_per_investigation: 40
+  max_cost_usd_per_investigation: 1.00
+  max_planner_critic_cycles: 4      # §3.5 hard cap
+  request_timeout_seconds: 300
+
+# LLM responses are cached by (model, prompt_hash) so regression runs compare
+# like with like despite LLM non-determinism. See CLAUDE.md#determinism.
+response_cache:
+  enabled: true
+  path: traces/llm_cache

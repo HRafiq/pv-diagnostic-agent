@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PV Diagnostic Agent</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/app.css">
+  <!--
+    Vendored, not CDN-loaded: the dashboard has to work offline and the exact
+    versions are pinned so a chart cannot silently change under an evaluation.
+    Alpine is deferred as its docs require.
+  -->
+  <script src="/static/vendor/plotly-2.35.2.min.js"></script>
+  <script defer src="/static/vendor/alpine-3.14.9.min.js"></script>
+</head>
+<body x-data="shell()" x-init="load()">
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="mark">PV</span>
+      <span>Diagnostic Agent</span>
+    </div>
+
+    <!--
+      Simulated time, not wall clock. Labelled "replay" because a plant manager
+      reading a 2019 date needs to know why it is not today.
+    -->
+    <div class="clock" x-show="state">
+      <span class="clock-label">replay clock</span>
+      <span class="clock-value" x-text="prettyNow"></span>
+      <span class="clock-speed"
+            x-text="state && state.replay_speed > 0 ? state.replay_speed + '× live' : 'stepped by watcher'"></span>
+    </div>
+  </header>
+
+  <nav class="tabs">
+    <template x-for="tab in tabs" :key="tab.key">
+      <button class="tab"
+              :class="{ 'is-active': tab.key === active, 'is-disabled': !tab.enabled }"
+              :disabled="!tab.enabled"
+              :title="tab.enabled ? '' : 'Arrives at build step ' + tab.step"
+              @click="active = tab.key"
+              x-text="tab.label"></button>
+    </template>
+  </nav>
+
+  <main>
+    <template x-if="error">
+      <div class="panel panel-error">
+        <h2>Could not load state</h2>
+        <p x-text="error"></p>
+      </div>
+    </template>
+
+    <template x-if="state">
+      <div>
+        <div class="panel">
+          <h2>Step 0 — foundations in place</h2>
+          <p class="lede">
+            Nothing is measured yet. This page exists to prove the seam: every
+            value below was read through <code>src/</code>, the same code the
+            agent calls. The tabs light up as each build step lands.
+          </p>
+          <dl class="kv">
+            <dt>Replay clock</dt><dd x-text="state.now"></dd>
+            <dt>Replay starts</dt><dd x-text="state.replay_start"></dd>
+            <dt>Sites configured</dt>
+            <dd x-text="state.sites.map(s => s.name).join(', ') || 'none yet'"></dd>
+            <dt>Model profile</dt><dd x-text="state.model_profile"></dd>
+            <dt>Anthropic API key</dt>
+            <dd>
+              <span :class="state.api_key_present ? 'ok' : 'warn'"
+                    x-text="state.api_key_present ? 'present' : 'not set — agent nodes will not run'"></span>
+            </dd>
+          </dl>
+        </div>
+
+        <div class="panel">
+          <h2>Reasoning models</h2>
+          <p class="lede">
+            One model per node, so the router and the critic need not carry the
+            cost of the largest model.
+          </p>
+          <table class="grid">
+            <thead><tr><th>Node</th><th>Model</th><th>Effort</th><th>Token cap</th></tr></thead>
+            <tbody>
+              <template x-for="n in state.nodes" :key="n.node">
+                <tr>
+                  <td x-text="n.node"></td>
+                  <td class="mono" x-text="n.model"></td>
+                  <td x-text="n.effort || '—'"></td>
+                  <td class="num" x-text="n.max_tokens.toLocaleString()"></td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="panel">
+          <h2>What lands next</h2>
+          <ol class="roadmap">
+            <template x-for="tab in tabs" :key="tab.key">
+              <li :class="{ 'done': tab.enabled }">
+                <span x-text="tab.label"></span>
+                <span class="step-badge" x-text="'step ' + tab.step"></span>
+              </li>
+            </template>
+          </ol>
+        </div>
+      </div>
+    </template>
+  </main>
+
+  <script>
+    function shell() {
+      return {
+        state: null,
+        error: null,
+        active: 'plant',
+        get tabs() { return this.state ? this.state.tabs : []; },
+        get prettyNow() {
+          if (!this.state) return '';
+          // Show the simulated instant plainly; no locale surprises.
+          return this.state.now.replace('T', ' ').replace('+00:00', ' UTC');
+        },
+        async load() {
+          try {
+            const response = await fetch('/api/state');
+            if (!response.ok) throw new Error('HTTP ' + response.status);
+            this.state = await response.json();
+          } catch (err) {
+            this.error = err.message;
+          }
+        },
+      };
+    }
+  </script>
+</body>
+</html>

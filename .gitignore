@@ -216,3 +216,20 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ---------------------------------------------------------------------------
+# pv-diagnostic-agent
+# ---------------------------------------------------------------------------
+# Never commit datasets, corpus PDFs, or traces. Ingest scripts + manifests
+# (with checksums) are committed instead, so everything stays reproducible.
+data/raw/
+data/interim/
+data/processed/
+corpus/raw/
+traces/
+.env
+*.parquet
+*.h5
+*.nc
+# Keep the directories themselves in git.
+!**/.gitkeep

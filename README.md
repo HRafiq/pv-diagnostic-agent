@@ -1,2 +1,167 @@
-# pv-diagnostic-agent
-an automated pipeline that performs the RCA of possible deficit in solar PV plant
+# PV Diagnostic Agent
+
+Root-cause analysis for solar PV plant performance deficits.
+
+A large plant loses money in two directions at once, and conventional monitoring
+shows neither. Real losses hide in normal-looking data — output tracks sunlight,
+so a cloudy week and a failed string look identical in MWh, and a string that
+fails in March can go unnoticed until an inspection in September. And false
+alarms cost more than the faults — performance ratio falls plant-wide every
+summer because hot modules are less efficient, and inverters hit their AC
+ceiling every clear midday by design. Both look like problems. Crews get
+dispatched, arrays get cleaned, and nothing was wrong.
+
+This system normalises production against irradiance and temperature so a real
+deficit becomes visible; investigates each deficit by taking measurements that
+discriminate between competing causes; sorts every finding into **fault** /
+**recoverable loss** / **by design** / **not the plant**; ranks by energy at
+stake; shows its full reasoning; and when the data genuinely cannot separate two
+causes, says so and names the cheap test that would.
+
+The output is one of three instructions: **send someone, schedule something, or
+do nothing.** The third is the one nobody sells and often the most valuable.
+
+> **Status: step 0 of 13.** Foundations only — schemas, clock, trace writer,
+> config, dashboard shell. Nothing is measured yet. See *Build progress* below.
+
+---
+
+## Why it is built this way
+
+**Atomic tools, not a classifier.** There are ~18 measurement tools —
+`compute_temp_corrected_pr`, `characterize_onset`, `per_mppt_current_balance`,
+`check_clearsky_consistency` — and no tool that returns a fault class. The
+agent's job is differential diagnosis: holding competing causes and choosing
+which discriminating measurement to take next, the way a clinician orders the
+next test. If the diagnosis happened inside one function, this would be a rules
+engine with a chat wrapper, every run would follow the same path, and the agent
+would only be narrating.
+
+**Agency is measured, not asserted.** Every tool call records `was_planned`. The
+fraction of runs that use a tool outside the initial plan is the sharpest single
+indicator of whether the planner is reasoning or just sequencing — near zero
+means it is a pipeline in disguise. Alongside it: distinct tool trajectories,
+critic-iteration spread, and self-initiated abstentions.
+
+**A rules engine is the baseline, not a component.** A deterministic rules engine
+runs on the same golden set, and the comparison is published whichever way it
+falls. If the rules engine wins outright, that is a more credible finding than
+"I built an agent".
+
+**The evaluation is designed to be able to fail.** Faults are injected at the
+physics layer, never the signature layer, so the diagnostic logic has to
+*rediscover* the signature. At least 40% of cases are things that look like
+faults and are not. `not_enough_evidence` is a scored correct answer on
+deliberately unresolvable cases. The held-back split is generated with
+parameters not inspected while iterating.
+
+**Nothing dishonest can reach the interface.** The rules that keep the output
+truthful are validators, not conventions — a `Finding` that shows a single cause
+and a confidence number when the investigation could not separate two causes
+cannot be constructed. That is the exact bug that dispatches a wash crew to a
+clean array.
+
+---
+
+## Getting started
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+cp .env.example .env          # ANTHROPIC_API_KEY needed only for agent nodes
+```
+
+```bash
+pytest                                    # 105 tests
+ruff check . && mypy src eval simulator   # lint + types
+
+python watcher.py status                  # clock, models, config
+python watcher.py run --until 2019-06-30 --step 1D
+
+uvicorn dashboard.app:app --reload        # http://127.0.0.1:8000
+```
+
+Physics, detectors, the simulator, the dashboard and the whole test suite run
+without an API key. Only the agent nodes need one.
+
+---
+
+## Layout
+
+```
+src/          UI-agnostic core — everything the agent and the dashboard share
+  clock.py      the ONLY time source (see below)
+  determinism.py  seeding and run-scoped RNG
+  config.py     typed loaders for config/*.yaml
+  trace/        TraceStep + JSONL writer — the dashboard's only data source
+  findings/     Finding model, lifecycle, energy ranking
+  agent/        state, nodes, plain loop (step 4), LangGraph port (step 12)
+  physics/ data/ detect/ tools/ rag/ knowledge/ baseline/ analyses/ viz/
+simulator/    physics-level fault injector
+eval/         runner, metrics, agency metrics, golden sets
+dashboard/    FastAPI + Jinja2 + Alpine.js + Plotly.js — thin, calls src/ only
+watcher.py    CLI: advances the clock, sweeps, writes findings
+```
+
+**Time is a replay clock.** There is no free real-time public PV feed, so "now"
+is a position in a historical dataset. `datetime.now()` is banned throughout
+`src/` and the ban is enforced by an AST scan in the test suite — a stray
+wall-clock read would compare a replayed 2019 dataset against today, empty every
+trailing window, and fail silently.
+
+**The dashboard cannot diverge from the agent.** A chart showing PR calls
+`physics.compute_pr()`, the same function the tool node calls. The dashboard
+never reimplements a computation and never triggers a run; `watcher.py` writes,
+the dashboard reads.
+
+---
+
+## Build progress
+
+| Step | Deliverable | State |
+| ---- | ----------- | ----- |
+| 0 | Skeleton, config, schemas, injected clock, JSONL trace writer, `CLAUDE.md` | **done** |
+| 1 | Data ingestion + pvlib ModelChain. Dashboard Tab 1 live | next |
+| 2 | Physics-level fault injector + Tab 4. First 15 golden cases | |
+| 3 | Evaluation harness — runner, metrics, tuning/held-back splits, Tab 5 | |
+| 4 | Vertical slice: plain-Python loop, 10 golden questions end to end, Tab 3 | |
+| 5 | Full atomic tool set + domain-knowledge YAML. Golden set to 60-80 | |
+| 6 | Critic with structured verdict, iteration cap, not-enough-evidence path | |
+| 7 | Rules-engine baseline + first rules-vs-agent comparison | |
+| 8 | Watcher: sweep, findings store with lifecycle, energy ranking. Tab 2 | |
+| 9 | RAG layer + retrieval golden set + ablation | |
+| 10 | Saved analyses registry with golden-case enforcement | |
+| 11 | Full evaluation, agency metrics, both experiments, `docs/FINDINGS.md` | |
+| 12 | LangGraph port; verify identical golden-set outputs | |
+| 13 | README with honest results, including whatever the ablations showed | |
+
+Each step is gated: it stops for review before the next one starts.
+
+---
+
+## Data
+
+Public data only. **DKASC** (Alice Springs, Australia) is the primary dataset —
+about ten years at five-minute resolution, ~30 arrays sharing one weather
+station, desert siting with real soiling and 45 °C ambient. **NREL PVDAQ** is
+secondary, and the best chance at real *labelled* fault events.
+
+Datasets are never committed. Ingest scripts download into a gitignored
+`data/raw/` and a manifest with SHA-256 checksums is committed instead, so the
+dataset is reproducible without shipping it.
+
+**Known limitation.** Essentially no public dataset carries per-MPPT DC string
+telemetry, so `per_mppt_current_balance` and the inverter-level comparisons are
+validated on a simulated multi-string plant driven by real measured weather. The
+simulator and the expectation model are deliberately different stacks — if they
+shared a configuration, every injected deficit would be trivially detectable and
+the accuracy figure would be meaningless.
+
+---
+
+## Results
+
+Nothing to report yet. When there is, it goes in `docs/FINDINGS.md` and here —
+including whichever way the rules-vs-agent comparison and the retrieval ablation
+fall. If retrieval turns out not to move accuracy, that is a finding and it gets
+published.
