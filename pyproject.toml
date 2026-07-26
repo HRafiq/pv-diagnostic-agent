@@ -20,6 +20,10 @@ dependencies = [
     "scipy==1.15.3",
     "pvlib==0.13.0",
     "requests==2.32.4",
+    # pandas needs an engine to read or write parquet and does not depend on
+    # one itself. The ingest layer stores every system as parquet, so without
+    # this the whole data path raises ImportError on a clean install.
+    "pyarrow==19.0.1",
 
     # --- agent --------------------------------------------------------------
     "anthropic==0.62.0",

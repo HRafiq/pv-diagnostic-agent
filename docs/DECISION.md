@@ -1042,3 +1042,57 @@ API key. Both this and DECISION 0040 were invisible locally and would have been
 caught on the first push. A job step fails the build if `data/raw/` ever
 contains a parquet file, so the tests cannot quietly reacquire the dependency
 they just shed.
+
+---
+
+## 0042 — uv and a committed lockfile; pyarrow was never declared (2026-07-26)
+
+**The bug.** `pyproject.toml` never listed `pyarrow`. pandas needs an engine to
+read or write parquet and depends on neither pyarrow nor fastparquet itself,
+and every ingested system is stored as parquet — so `src/data/ingest.py`,
+`load_plant`, the Watcher, both evaluation engines and the dashboard all sit on
+top of a dependency the project did not declare. It was pre-installed in the
+development container (`Required-by:` empty — nothing pulled it in), so it
+worked there and raised `ImportError` on every clean install.
+
+**Why it took three attempts to find.** This is the third bug in a row that was
+invisible locally: uncommitted source (0040), tests reading a gitignored
+dataset (0041), and now an undeclared dependency. Each time the development
+environment had state a fresh clone does not, and each time a green local suite
+was read as evidence about the repository. It is not; it is evidence about one
+disk.
+
+Note that an import scanner would **not** have caught this one. Nothing in
+`src/` imports pyarrow — pandas loads it at runtime inside `to_parquet`. The
+only check that finds it is installing from the declared dependencies alone and
+running everything. That is a property of the *process*, not of any test.
+
+**Decision.**
+
+- `pyarrow==19.0.1` is a core dependency. Stated in `pyproject.toml` with the
+  reason, because "pandas needs it" is not obvious from any import.
+- Dependencies are managed with **uv** against a committed `uv.lock`. Pinned
+  versions in `pyproject.toml` already fixed direct dependencies; the lockfile
+  fixes the transitive ones too, so a clone in six months resolves what this
+  one did. `uv sync --extra dev` is the documented setup.
+- `tests/test_data_layer.py::test_the_parquet_engine_is_installed` round-trips
+  a frame through `load_dataset`. A missing engine now fails as one named test
+  rather than as three ImportErrors inside fixture setup.
+- `tests/test_repo_tracking.py` gains `ROOT_FILES`, which pins that `uv.lock`,
+  `pyproject.toml`, `.gitignore` and the CI workflow are present, un-ignored
+  and tracked. The stock Python `.gitignore` ships a commented-out `uv.lock`
+  line; uncommenting it would silently return the project to unlocked
+  resolution, which is DECISION 0040 in a new costume.
+- CI runs `uv lock --check`, so a dependency added to `pyproject.toml` without
+  re-running `uv lock` fails the build instead of installing fine on the author's
+  machine and being missing for everyone else.
+
+**Why CI at all — the point of these three entries.** The project has strong
+guarantees about *reasoning*: the numeric grounding check, the critic's
+structured verdict, the anti-circularity rules, the wall-clock scan. It had no
+guarantee at all that the thing being reasoned about was installable. CI is a
+machine that starts from nothing on every push — clean checkout, no data
+directory, no API key, no packages except what the lockfile names — on both
+ends of the `requires-python` range. All three bugs above would have been
+caught by its first run, in minutes, instead of one at a time by a person on a
+laptop.

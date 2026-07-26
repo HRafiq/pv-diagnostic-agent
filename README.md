@@ -81,16 +81,26 @@ tool where it is deterministic and testable, not in a sentence.
 
 ## Getting started
 
+Dependencies are managed with [uv](https://docs.astral.sh/uv/) and resolved in
+a committed `uv.lock`, so every machine and CI install the same versions.
+
 ```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
+uv sync --extra dev           # creates .venv and installs from the lockfile
 cp .env.example .env          # ANTHROPIC_API_KEY needed only for agent nodes
 ```
 
 ```bash
-pytest                                    # 567 tests
-ruff check . && mypy src eval simulator   # lint + types
+uv run pytest                                    # 577 tests
+uv run ruff check . && uv run mypy src eval simulator dashboard
 ```
+
+`uv run` uses the project environment without needing it activated. If you
+prefer to activate it, `source .venv/bin/activate` and drop the `uv run`
+prefix from every command below.
+
+> Adding or changing a dependency means editing `pyproject.toml` and running
+> `uv lock`; commit the updated `uv.lock` with it. CI runs `uv lock --check`
+> and fails if the two have drifted.
 
 **Everything below runs without an API key**, including the whole test suite:
 

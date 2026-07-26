@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
 
+from src.data.ingest import load_dataset
 from src.data.quality import profile_quality, summarise_string_balance
 from src.data.schema import resolve_channels
 from src.data.sources import SystemMetadata, day_key, iter_days
@@ -256,3 +259,31 @@ def test_ac_capacity_hint_parsing(model: str, expected: float | None) -> None:
         raw={},
     )
     assert meta.ac_capacity_kw_hint == expected
+
+
+# --------------------------------------------------------------------------
+# Parquet round-trip — the undeclared-dependency trap
+# --------------------------------------------------------------------------
+def test_the_parquet_engine_is_installed(tmp_path: Path) -> None:
+    """pandas needs pyarrow or fastparquet and depends on neither itself.
+
+    Every ingested system is stored as parquet, so a missing engine breaks the
+    entire data path — ingest, `load_plant`, the Watcher, both evaluation
+    engines and the dashboard. It shipped that way once: pyarrow was present in
+    the development container and absent from `pyproject.toml`, so the failure
+    only appeared on a clean install, as three confusing errors inside fixture
+    setup. This asserts the capability directly, so it fails as one named test.
+    """
+    frame = pd.DataFrame(
+        {"a": [1.0, 2.0]},
+        index=pd.date_range("2017-01-01", periods=2, freq="15min", tz="UTC"),
+    )
+    path = tmp_path / "round_trip.parquet"
+    frame.to_parquet(path)
+
+    back = load_dataset(path)
+    assert list(back.columns) == ["a"]
+    assert back.index.tz is not None, "the loader must return a tz-aware index"
+    # `check_freq=False`: parquet stores the timestamps, not the DatetimeIndex's
+    # inferred frequency, and nothing downstream reads that attribute.
+    pd.testing.assert_frame_equal(back, frame, check_names=False, check_freq=False)

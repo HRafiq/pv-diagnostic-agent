@@ -27,6 +27,18 @@ SOURCE_SUFFIXES = {".py", ".yaml", ".yml", ".html", ".js", ".css", ".jinja"}
 # Paths inside the source dirs that are legitimately generated, not authored.
 GENERATED = ("__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache")
 
+# Root files that are not under any source directory and must still be in git.
+# `uv.lock` is the one that would hurt: the stock Python .gitignore ships a
+# commented-out `uv.lock` line, and uncommenting it would leave every clone and
+# every CI run resolving dependencies afresh — which is the whole thing the
+# lockfile exists to prevent.
+ROOT_FILES = (
+    "pyproject.toml",
+    "uv.lock",
+    ".gitignore",
+    ".github/workflows/ci.yml",
+)
+
 
 def _is_git_repo() -> bool:
     return (REPO_ROOT / ".git").exists()
@@ -104,6 +116,28 @@ def test_committed_tree_can_import_the_source_packages() -> None:
         "these modules sit in an otherwise-committed package but are not in the "
         "git index — a fresh clone will fail to import them:\n  " + "\n  ".join(missing)
     )
+
+
+@pytest.mark.skipif(not _is_git_repo(), reason="not a git checkout")
+@pytest.mark.parametrize("name", ROOT_FILES)
+def test_the_root_files_are_present_and_tracked(name: str) -> None:
+    assert (REPO_ROOT / name).is_file(), f"{name} is missing from the checkout"
+
+    ignored = subprocess.run(
+        ["git", "check-ignore", name],
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT,
+    )
+    assert ignored.returncode != 0, f"{name} is excluded by .gitignore"
+
+    tracked = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", name],
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT,
+    )
+    assert tracked.returncode == 0, f"{name} is not in the git index"
 
 
 @pytest.mark.parametrize("directory", SOURCE_DIRS)
