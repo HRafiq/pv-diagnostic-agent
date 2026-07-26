@@ -232,6 +232,101 @@
       </div>
     </template>
 
+    <!-- ================= WATCHER TAB ================= -->
+    <template x-if="state && active === 'watcher'">
+      <div>
+        <template x-if="!watch">
+          <div class="panel"><p class="lede">Loading findings…</p></div>
+        </template>
+
+        <template x-if="watch">
+          <div class="controls">
+            <label class="inline">
+              <input type="checkbox" x-model="showClosed" @change="loadFindings()">
+              <span>Show closed</span>
+            </label>
+            <span class="muted" x-show="watch.counts &amp;&amp; Object.keys(watch.counts).length"
+                  x-text="Object.entries(watch.counts).map(([k, v]) => v + ' ' + k).join(', ')"></span>
+            <span class="loading" x-show="loading">loading…</span>
+          </div>
+        </template>
+
+        <template x-if="watch && !watch.findings.length">
+          <div class="panel">
+            <h2 x-text="showClosed ? 'No findings at all' : 'Nothing open'"></h2>
+            <p class="lede">
+              The Watcher writes to <code x-text="watch.store"></code>; this tab
+              only reads. Nothing here is a live alarm — the replay clock sits at
+              <span class="mono" x-text="watch.now.slice(0, 10)"></span>, so
+              "now" is a position in a historical record.
+            </p>
+            <p class="lede">
+              Sweep with
+              <code>python watcher.py run --until 2016-09-01 --step 14D</code>.
+            </p>
+          </div>
+        </template>
+
+        <template x-if="watch && watch.findings.length">
+          <div>
+            <p class="caption caption-wide">
+              Ranked by energy at stake, with verified figures above unverified
+              ones — an unverified number is a smaller claim and the order says so.
+            </p>
+
+            <template x-for="f in watch.findings" :key="f.identity">
+              <div class="panel" :class="f.settled ? '' : 'panel-unsettled'">
+                <div class="finding-head">
+                  <h2 x-text="f.title"></h2>
+                  <span class="pill" x-text="f.lifecycle"></span>
+                  <span class="finding-energy">
+                    <span x-text="f.energy_at_stake_kwh.toLocaleString(undefined, {maximumFractionDigits: 0})"></span> kWh
+                    <span class="muted" x-show="!f.energy_verified">unverified</span>
+                  </span>
+                </div>
+                <p class="lede mono" x-text="f.scope"></p>
+                <p x-text="f.summary"></p>
+
+                <template x-if="f.settled">
+                  <p class="verdict">
+                    <span class="pill" x-text="prettyCategory(f.category)"></span>
+                    <strong x-text="f.cause"></strong>
+                    <span class="muted" x-show="f.confidence !== null"
+                          x-text="'confidence ' + Number(f.confidence).toFixed(2)"></span>
+                  </p>
+                </template>
+
+                <template x-if="!f.settled">
+                  <div>
+                    <p class="verdict">
+                      <span class="pill pill-open">Not enough evidence</span>
+                      <span>These both fit what was measured:</span>
+                    </p>
+                    <ul class="causes">
+                      <template x-for="c in f.candidate_causes" :key="c.cause">
+                        <li><strong x-text="c.cause"></strong> — <span x-text="c.consequence_if_true"></span></li>
+                      </template>
+                    </ul>
+                    <p class="lede">
+                      <strong>What would settle it:</strong>
+                      <span x-text="f.resolving_measurement"></span>
+                    </p>
+                  </div>
+                </template>
+
+                <p class="lede"><strong>Recommended:</strong> <span x-text="f.recommended_action"></span></p>
+                <p class="caption">
+                  Seen <span x-text="f.history"></span> times, last on
+                  <span class="mono" x-text="f.observed_at.slice(0, 10)"></span>.
+                  Trace <span class="mono" x-text="f.investigation_id"></span>.
+                </p>
+              </div>
+            </template>
+          </div>
+        </template>
+      </div>
+    </template>
+
     <!-- ================= INVESTIGATE TAB ================= -->
     <template x-if="state && active === 'investigate'">
       <div>
@@ -437,7 +532,7 @@
     </template>
 
     <!-- ================= PLACEHOLDER TABS ================= -->
-    <template x-if="state && active !== 'plant' && active !== 'investigate'">
+    <template x-if="state && !['plant', 'investigate', 'watcher'].includes(active)">
       <div class="panel">
         <h2 x-text="tabLabel(active)"></h2>
         <p class="lede">
@@ -453,6 +548,7 @@
         state: null, plant: null, error: null, loading: false,
         active: 'plant', showTable: false,
         runs: null, run: null, runId: null,
+        watch: null, showClosed: false,
         theme: document.documentElement.dataset.theme || 'dark',
         systemId: null, startDate: '', endDate: '', resolution: '1D',
 
@@ -500,6 +596,7 @@
             if (!r.ok) throw new Error('HTTP ' + r.status);
             this.state = await r.json();
             await this.loadRuns();
+            await this.loadFindings();
             if (this.state.systems.length) {
               const s = this.state.systems[0];
               this.systemId = s.system_id;
@@ -522,6 +619,16 @@
             this.runId = this.runs.investigations[0].id;
             await this.loadRun();
           }
+        },
+
+        async loadFindings() {
+          this.loading = true;
+          try {
+            const q = this.showClosed ? '?include_closed=true' : '';
+            const r = await fetch('/api/findings' + q);
+            this.watch = r.ok ? await r.json()
+                              : { findings: [], store: '(unavailable)', counts: {}, now: '' };
+          } finally { this.loading = false; }
         },
 
         async loadRun() {

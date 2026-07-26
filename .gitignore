@@ -233,3 +233,4 @@ traces/
 *.nc
 # Keep the directories themselves in git.
 !**/.gitkeep
+findings/

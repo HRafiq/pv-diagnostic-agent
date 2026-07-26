@@ -57,9 +57,9 @@ def test_tabs_are_disabled_until_their_step_lands() -> None:
     tabs = client.get("/api/state").json()["tabs"]
     assert len(tabs) == 5
     enabled = {t["key"] for t in tabs if t["enabled"]}
-    # Plant went live at step 1, Investigate at step 4; the rest arrive with
-    # their own steps.
-    assert enabled == {"plant", "investigate"}
+    # Plant at step 1, Investigate at step 4, Watcher at step 8; the rest
+    # arrive with their own steps.
+    assert enabled == {"plant", "investigate", "watcher"}
     assert {t["key"] for t in tabs} == {
         "plant",
         "watcher",
@@ -268,3 +268,74 @@ def test_the_api_never_speaks_of_hypotheses(traces: Path) -> None:
     test_a_trace_is_listed_with_its_counters(traces)
     body = client.get("/api/investigation/INV-UNIT-001").text.lower()
     assert "hypothes" not in body
+
+
+# --------------------------------------------------------------------------
+# Watcher tab (step 8) — the findings store, read-only
+# --------------------------------------------------------------------------
+def test_findings_endpoint_responds_on_an_empty_store() -> None:
+    payload = client.get("/api/findings").json()
+    assert payload["findings"] == []
+    assert "store" in payload
+
+
+def test_the_dashboard_never_sweeps() -> None:
+    """`watcher.py` writes; the dashboard reads. A request-scoped web app has
+    nowhere to put a clock that advances."""
+    routes = {getattr(r, "path", "") for r in app.routes}
+    assert not any("sweep" in r or "investigate/run" in r for r in routes)
+    for route in app.routes:
+        methods = getattr(route, "methods", set())
+        assert methods <= {"GET", "HEAD"}, f"{route} accepts a write method"
+
+
+def test_findings_are_ranked_by_energy_with_verified_first(tmp_path: Path) -> None:
+    from datetime import UTC as _UTC
+
+    from dashboard import app as dashboard_app
+    from src.clock import FrozenClock
+    from src.findings.models import CandidateCause, Finding
+    from src.findings.store import FindingsStore
+
+    def make(scope: str, energy: float, settled: bool) -> Finding:
+        return Finding(
+            id=f"F-{scope}",
+            detected_at=datetime(2017, 4, 1, tzinfo=_UTC),
+            scope=scope,
+            title=scope,
+            summary="s",
+            category="fault" if settled else "not_the_plant",
+            lifecycle="new",
+            settled=settled,
+            cause="string_outage" if settled else None,
+            confidence=0.8 if settled else None,
+            candidate_causes=(
+                []
+                if settled
+                else [
+                    CandidateCause(cause="clipping", consequence_if_true="a"),
+                    CandidateCause(cause="curtailment", consequence_if_true="b"),
+                ]
+            ),
+            resolving_measurement=None if settled else "check the dispatch log",
+            energy_at_stake_kwh=energy,
+            energy_verified=settled,
+            recommended_action="go",
+            investigation_id="INV-1",
+        )
+
+    path = tmp_path / "store.jsonl"
+    store = FindingsStore(path, clock=FrozenClock(datetime(2017, 4, 1, tzinfo=_UTC)))
+    store.observe([make("open", 9000.0, False), make("settled", 10.0, True)])
+
+    original = dashboard_app.FINDINGS_PATH
+    dashboard_app.FINDINGS_PATH = path
+    try:
+        payload = client.get("/api/findings").json()
+    finally:
+        dashboard_app.FINDINGS_PATH = original
+
+    assert [f["scope"] for f in payload["findings"]] == ["settled", "open"]
+    assert payload["findings"][1]["energy_verified"] is False
+    assert payload["findings"][1]["cause"] is None
+    assert len(payload["findings"][1]["candidate_causes"]) == 2

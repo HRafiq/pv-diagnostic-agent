@@ -790,3 +790,86 @@ not been run, not because it is pending analysis, and the difference matters.
 The document also records the bugs the evaluation found in itself, each of which
 would have made a published accuracy figure meaningless. That section is
 deliberately not in an appendix.
+
+---
+
+## 0034 — The findings store is an append-only log, and identity is not the text (2026-07-26)
+
+**Decision.** Nothing is ever mutated or deleted. Every state change appends a
+record and the current view is a fold over the log. A finding's identity is
+`(scope, cause)` when settled and `(scope, sorted set of surviving causes)` when
+not.
+
+**Why.** Without lifecycle you get the same three findings shouted at you every
+morning until you stop reading them, and a monitoring system nobody reads is
+worse than none because it provides cover. So the store's real job is knowing
+that the thing it saw today is the thing it saw yesterday.
+
+Identity cannot be the wording: two runs of the same investigation produce
+different prose, and matching on text would open a new finding every sweep.
+Identifying an unsettled finding by its *set* of survivors means narrowing four
+candidates to two correctly opens a new finding — that is a different claim.
+
+**Two things the tests forced out.**
+
+*A quiet sweep has to be recorded.* A sweep that writes nothing leaves no trace,
+so counting distinct log timestamps meant a finding was only aged when some
+*other* finding happened to be active. On a plant that had gone quiet, a fixed
+fault would sit open forever. The miss count is now carried on the record, and
+`watcher.py` tells the store about every sweep including the empty ones.
+
+*Ageing records are not news.* "Still not seen, second sweep" is real history
+and belongs in the log, but a what's-new-since-yesterday list padded with it is
+one nobody reads, so `since()` excludes them by default.
+
+**Resolve after three quiet sweeps, not one.** One is too eager — a cloudy day
+can hide a real string fault from a detector. This is the knob that decides
+whether the interface cries wolf or goes quiet on something real.
+
+**Suppressed stays suppressed.** Re-raising a finding an operator has dismissed
+is exactly how they learn to ignore the whole interface.
+
+---
+
+## 0035 — Detectors decide when to look, never why (2026-07-26)
+
+**Decision.** `DeficitSignal` carries a scope, a window, a measured size and the
+name of the measurement that produced it. It has no cause field and no field one
+could be smuggled into. The diagnostic — rules engine or agent — is a separate
+step.
+
+**Why.** The sweep is the only thing that runs unprompted, so if it named causes
+the Watcher would be a rules engine on a timer and the agent would be reduced to
+writing up a conclusion already reached.
+
+Detectors overlap deliberately: a window can trip three at once, and an
+investigation starting from three independent signals is better grounded than
+one starting from whichever fired first. Signals are ordered by how far past
+their threshold they sit, so the ranking is stable rather than alphabetical.
+
+**The trailing window ends the day before "now".** The current day is still
+accumulating, and scoring a half-finished day produces a deficit every single
+morning.
+
+**The performance detector compares against the preceding month, not an absolute
+level.** A plant that has run at 0.78 for two years is not developing a fault,
+and an absolute threshold would open the same investigation every day forever.
+
+---
+
+## 0036 — The replay clock now starts inside the ingested record (2026-07-26)
+
+**Decision.** `config/site_defaults.yaml` moves the clock start from
+2019-01-01 to 2017-02-01.
+
+**Why.** The data covers 2016–2017. A start date the data does not cover leaves
+every trailing window empty, so the Watcher sweeps forever and finds nothing —
+silently, with a zero exit code. A test now asserts the configured start falls
+inside the record.
+
+**What it found once pointed at real data.** Sweeping mid-2016 with
+`--engine rules` picks up the **real 35-day telemetry gap** in this dataset and
+carries it through the full lifecycle: new, ongoing, ongoing, then resolved
+after three quiet sweeps. That is an unlabelled event found by the detectors
+rather than by a label, and it is the only ground truth in the project that did
+not come from an injector.

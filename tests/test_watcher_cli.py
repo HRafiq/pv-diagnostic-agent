@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import argparse
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 
 import watcher
+from src.config import build_clock
 
 
 @pytest.mark.parametrize(
@@ -56,35 +58,43 @@ def test_status_reports_clock_and_models(capsys: pytest.CaptureFixture[str]) -> 
 def test_step_advances_and_reports_the_window(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    assert watcher.main(["step", "--step", "1D"]) == 0
+    assert watcher.main(["step", "--step", "1D", "--dry-run"]) == 0
     out = capsys.readouterr().out
     assert "advanced" in out
-    assert "dry-run" in out
+    assert "sweeping" in out
 
 
 def test_run_rejects_a_past_target(capsys: pytest.CaptureFixture[str]) -> None:
-    # The replay clock starts in 2019; 2018 is behind it.
-    assert watcher.main(["run", "--until", "2018-01-01"]) == 1
+    # The replay clock starts inside the ingested record; anything before that
+    # is behind it, and a clock that refuses to rewind is the whole point.
+    assert watcher.main(["run", "--until", "2015-01-01"]) == 1
     assert "not in the future" in capsys.readouterr().err
 
 
 def test_run_walks_forward_in_steps(capsys: pytest.CaptureFixture[str]) -> None:
-    assert watcher.main(["run", "--until", "2019-01-05", "--step", "1D"]) == 0
+    start = build_clock().now().date()
+    until = start + timedelta(days=4)
+    assert (
+        watcher.main(["run", "--until", str(until), "--step", "1D", "--dry-run"]) == 0
+    )
     out = capsys.readouterr().out
-    # Four one-day steps to cross from the 1st to the 5th.
-    assert out.count("would sweep") == 4
+    assert out.count("sweeping") == 4
     assert "reached" in out
 
 
-def test_sweep_without_dry_run_is_not_silently_a_no_op() -> None:
-    # Until detectors land at step 8, a real sweep must fail loudly rather than
-    # return success and write nothing.
-    with pytest.raises(NotImplementedError, match="step 8"):
-        watcher._sweep(
-            datetime(2019, 1, 1, tzinfo=UTC),
-            datetime(2019, 1, 2, tzinfo=UTC),
-            dry_run=False,
-        )
+def test_a_dry_run_writes_no_findings(tmp_path: Any) -> None:
+    """A dry run must be visibly a dry run, not a silent no-op."""
+    store = tmp_path / "s.jsonl"
+    assert (
+        watcher.main(["step", "--step", "1D", "--dry-run", "--store", str(store)]) == 0
+    )
+    assert not store.exists()
+
+
+def test_the_replay_clock_starts_inside_the_ingested_record() -> None:
+    """A start date the data does not cover leaves every trailing window empty
+    and the Watcher finds nothing, silently."""
+    assert 2016 <= build_clock().now().year <= 2017
 
 
 def test_a_command_is_required() -> None:

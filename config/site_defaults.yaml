@@ -131,7 +131,10 @@ thresholds:
 # so "now" is a position in a historical dataset.
 # --------------------------------------------------------------------------
 clock:
-  start: "2019-01-01T00:00:00+00:00"
+  # Inside the ingested record, not after it. "Now" is a position in a
+  # historical dataset, so a start date the data does not cover leaves every
+  # trailing window empty and the Watcher finds nothing, silently.
+  start: "2017-02-01T00:00:00+00:00"
   # Wall-clock seconds per simulated second when running accelerated. 0 means
   # the clock only moves when something explicitly advances it (the normal
   # mode: `watcher.py` steps it one data interval at a time).

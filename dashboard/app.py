@@ -43,7 +43,7 @@ templates = Jinja2Templates(directory=str(HERE / "templates"))
 
 TABS: list[dict[str, Any]] = [
     {"key": "plant", "label": "Plant", "enabled": True, "step": 1},
-    {"key": "watcher", "label": "Watcher", "enabled": False, "step": 8},
+    {"key": "watcher", "label": "Watcher", "enabled": True, "step": 8},
     {"key": "investigate", "label": "Investigate", "enabled": True, "step": 4},
     {"key": "scenarios", "label": "Scenario builder", "enabled": False, "step": 2},
     {"key": "evaluation", "label": "Evaluation", "enabled": False, "step": 3},
@@ -381,6 +381,70 @@ def api_investigation(investigation_id: str) -> dict[str, Any]:
             for s in steps
         ],
     }
+
+
+# ---------------------------------------------------------------------------
+# Watcher tab — the findings store, read-only
+# ---------------------------------------------------------------------------
+FINDINGS_PATH = REPO_ROOT / "findings" / "store.jsonl"
+
+
+@app.get("/api/findings")
+def api_findings(include_closed: bool = False) -> dict[str, Any]:
+    """What the Watcher has found, ranked by energy at stake.
+
+    The dashboard never sweeps. `watcher.py` writes; this reads. That split is
+    what makes the replay clock honest — a request-scoped web app has nowhere
+    to put a clock that advances.
+    """
+    from src.findings.store import FindingsStore
+
+    clock = build_clock()
+    store = FindingsStore(FINDINGS_PATH, clock=clock)
+    records = store.current() if include_closed else store.open_findings()
+
+    return {
+        "store": str(FINDINGS_PATH),
+        "now": clock.now().isoformat(),
+        "counts": _lifecycle_counts(store.current()),
+        "findings": [
+            {
+                "identity": r.identity,
+                "lifecycle": r.lifecycle,
+                "observed_at": r.observed_at.isoformat(),
+                "misses": r.misses,
+                "id": r.finding.id,
+                "scope": r.finding.scope,
+                "title": r.finding.title,
+                "summary": r.finding.summary,
+                "category": r.finding.category,
+                "settled": r.finding.settled,
+                "cause": r.finding.cause,
+                "confidence": r.finding.confidence,
+                "candidate_causes": [
+                    {
+                        "cause": c.cause,
+                        "consequence_if_true": c.consequence_if_true,
+                    }
+                    for c in r.finding.candidate_causes
+                ],
+                "resolving_measurement": r.finding.resolving_measurement,
+                "energy_at_stake_kwh": r.finding.energy_at_stake_kwh,
+                "energy_verified": r.finding.energy_verified,
+                "recommended_action": r.finding.recommended_action,
+                "investigation_id": r.finding.investigation_id,
+                "history": len(store.history(r.identity)),
+            }
+            for r in records
+        ],
+    }
+
+
+def _lifecycle_counts(records: list[Any]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for record in records:
+        counts[record.lifecycle] = counts.get(record.lifecycle, 0) + 1
+    return counts
 
 
 @app.get("/", response_class=HTMLResponse)
