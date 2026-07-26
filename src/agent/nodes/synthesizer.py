@@ -195,10 +195,12 @@ def synthesize(
     results: list[ToolResult],
     errors: list[str],
     revision_request: str | None = None,
+    knowledge: str = "",
 ) -> Synthesis:
     """Write the finding from what was measured."""
     parts = [
         brief,
+        *(["", "WHAT IS KNOWN ABOUT THESE CAUSES", knowledge] if knowledge else []),
         "",
         "CANDIDATE CAUSES",
         hypothesis_digest(state),

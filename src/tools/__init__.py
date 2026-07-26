@@ -25,6 +25,7 @@ from src.tools.base import (
     WindowArgs,
     slice_window,
 )
+from src.tools.diagnostics import DIAGNOSTIC_SPECS
 from src.tools.measurements import SPECS
 
 __all__ = [
@@ -41,7 +42,9 @@ __all__ = [
     "tool_names",
 ]
 
-REGISTRY: dict[str, ToolSpec] = {spec.name: spec for spec in SPECS}
+REGISTRY: dict[str, ToolSpec] = {
+    spec.name: spec for spec in (*SPECS, *DIAGNOSTIC_SPECS)
+}
 
 _FORBIDDEN = ("classify", "diagnose", "identify_fault", "explain")
 for _name in REGISTRY:

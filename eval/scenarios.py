@@ -38,12 +38,23 @@ def load_system_frame(system_id: int, data_dir: Path) -> pd.DataFrame:
 
 @dataclass(frozen=True)
 class MaterialisedCase:
-    """A case with its data realised."""
+    """A case with its data realised.
+
+    `frame` is the case window, perturbed. `full_record` is the *entire*
+    ingested series with that same perturbation spliced back in, and it is what
+    the diagnostic actually gets. The distinction is load-bearing: a real
+    investigation is asked about a fortnight but has the whole history to reach
+    for, and several measurements are meaningless without it — "is this new?"
+    needs the month before, and "was the weather unusual?" needs the same
+    calendar weeks in other years. Handing over only the window silently turns
+    those tools into errors and hides half the tool set from the evaluation.
+    """
 
     case: GoldenCase
     frame: pd.DataFrame
     baseline: pd.DataFrame
     record: InjectionRecord | None
+    full_record: pd.DataFrame
 
     @property
     def truly_lost_kwh(self) -> float:
@@ -92,7 +103,7 @@ def materialise(case: GoldenCase, data_dir: Path) -> MaterialisedCase:
         raise ValueError(f"case {case.id}: window {case.start}..{case.end} has no data")
 
     if case.injection is None:
-        return MaterialisedCase(case, window, window.copy(), None)
+        return MaterialisedCase(case, window, window.copy(), None, frame)
 
     kind = case.injection["kind"]
     if kind not in INJECTORS:
@@ -105,4 +116,9 @@ def materialise(case: GoldenCase, data_dir: Path) -> MaterialisedCase:
         end=str(window.index.max()),
         **params,
     )
-    return MaterialisedCase(case, injected, window.copy(), record)
+    # Splice the perturbed window back into the untouched record. History
+    # before the window stays clean, which is what makes a trailing baseline a
+    # real comparison rather than a comparison against the fault itself.
+    full = frame.copy()
+    full.loc[injected.index, injected.columns] = injected
+    return MaterialisedCase(case, injected, window.copy(), record, full)

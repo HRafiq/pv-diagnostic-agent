@@ -21,7 +21,7 @@ causes, says so and names the cheap test that would.
 The output is one of three instructions: **send someone, schedule something, or
 do nothing.** The third is the one nobody sells and often the most valuable.
 
-> **Status: steps 0–4 of 13 complete.** Real data ingested, physics validated,
+> **Status: steps 0–5 of 13 complete.** Real data ingested, physics validated,
 > fault injector and evaluation harness running with a rules baseline scored,
 > and the agent loop taking measurements end to end with its reasoning on
 > screen. See *Build progress* below.
@@ -30,7 +30,7 @@ do nothing.** The third is the one nobody sells and often the most valuable.
 
 ## Why it is built this way
 
-**Atomic tools, not a classifier.** There are ~18 measurement tools —
+**Atomic tools, not a classifier.** There are 18 measurement tools —
 `compute_temp_corrected_pr`, `characterize_onset`, `per_mppt_current_balance`,
 `check_clearsky_consistency` — and no tool that returns a fault class. The
 agent's job is differential diagnosis: holding competing causes and choosing
@@ -80,7 +80,7 @@ cp .env.example .env          # ANTHROPIC_API_KEY needed only for agent nodes
 ```
 
 ```bash
-pytest                                    # 340 tests
+pytest                                    # 416 tests
 ruff check . && mypy src eval simulator   # lint + types
 
 python watcher.py status                  # clock, models, config
@@ -138,8 +138,8 @@ the dashboard reads.
 | 2 | Physics-level fault injector, 7 injectors, 20 golden cases | **done** |
 | 3 | Evaluation harness — runner, metrics, agency metrics, rules baseline | **done** |
 | 4 | Vertical slice: plain-Python loop, 9 measurement tools, Tab 3 | **done** |
-| 5 | Full atomic tool set + domain-knowledge YAML. Golden set to 60-80 | next |
-| 6 | Critic with structured verdict, iteration cap, not-enough-evidence path | |
+| 5 | Full atomic tool set (18), domain knowledge, golden set to 86 | **done** |
+| 6 | Critic with structured verdict, iteration cap, not-enough-evidence path | next |
 | 7 | Rules-engine baseline + first rules-vs-agent comparison | |
 | 8 | Watcher: sweep, findings store with lifecycle, energy ranking. Tab 2 | |
 | 9 | RAG layer + retrieval golden set + ablation | |

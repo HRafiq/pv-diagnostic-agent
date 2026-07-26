@@ -35,6 +35,9 @@ from src.tools.base import (
 
 __all__ = ["SPECS"]
 
+# Shared with `diagnostics.py`; both are one-line helpers with no home of
+# their own worth making.
+
 
 def _finite(value: float) -> float:
     """Ledger values must be real numbers. NaN in a ledger is a silent lie."""

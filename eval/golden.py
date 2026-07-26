@@ -375,6 +375,239 @@ def _build_for_split(
             "reasons. This is where a threshold detector fails."
         ),
     )
+
+    # -----------------------------------------------------------------
+    # Variants. The ten cases above are the hand-written ones, each chosen to
+    # exercise a specific piece of reasoning. These sweep the same physics
+    # across windows and severities, because a set of ten clean archetypes
+    # measures whether a detector recognises archetypes — the interesting
+    # failures are the marginal ones, and marginal cases only exist if
+    # severity is varied deliberately.
+    #
+    # Composition is chosen, not emergent: look-alikes must stay above 40% or
+    # a detector that alarms on any deficit scores well and the evaluation has
+    # taught nothing.
+    # -----------------------------------------------------------------
+    def variant(
+        label: str,
+        window_index: int,
+        question: str,
+        category: Category | None,
+        cause: str | None,
+        injection: dict[str, Any] | None,
+        note: str,
+        settled: bool = True,
+        candidates: list[str] | None = None,
+        resolving: str | None = None,
+        window_extra_days: int = 0,
+    ) -> None:
+        window = w_at(window_index)
+        if window_extra_days:
+            window = extend(window, window_extra_days)
+        add(
+            system_id=system_id,
+            start=window[0],
+            end=window[1],
+            question=question,
+            expected_category=category,
+            expected_cause=cause,
+            settled=settled,
+            candidate_causes=candidates or [],
+            resolving_measurement=resolving,
+            injection=injection,
+            notes=note,
+        )
+
+    # --- string faults, from unmistakable to marginal --------------------
+    for n, (string_index, fraction, ramp) in enumerate(
+        [
+            (1, 1.0, 0.0),
+            (4, 0.7, 0.0),
+            (6, 0.55, 1440.0),
+            (2, 0.35, 4320.0),
+            (5, 0.25, 0.0),
+            (7, 0.9, 720.0),
+        ]
+    ):
+        variant(
+            f"string-{n}",
+            n,
+            "Output on this array is below where it should be. What is going on?",
+            "fault",
+            "string_outage",
+            {
+                "kind": "string_outage",
+                "params": {
+                    "string_index": string_index,
+                    "fraction_lost": fraction,
+                    "transition_minutes": ramp,
+                    "seed": seed_for(f"string-v{n}"),
+                },
+            },
+            (
+                f"String {string_index} loses {fraction:.0%}"
+                + (f" over {ramp / 1440:.1f} days" if ramp else " as a step")
+                + ". The 25% case is deliberately near the noise floor."
+            ),
+        )
+
+    # --- shadows, varying depth, extent and time of day ------------------
+    # UTC hours; the site logs at UTC-5, so 12-15 UTC is 07:00-10:00 local.
+    for n, (h0, h1, depth, strings) in enumerate(
+        [(12, 15, 0.6, 3), (13, 16, 0.45, 4), (20, 23, 0.5, 3), (12, 14, 0.7, 2)]
+    ):
+        variant(
+            f"shade-{n}",
+            n + 1,
+            "Production looks weak at one end of the day. Is something wrong?",
+            "fault",
+            "shading",
+            {
+                "kind": "shading",
+                "params": {
+                    "hour_start": h0,
+                    "hour_end": h1,
+                    "depth": depth,
+                    "strings_affected": strings,
+                    "string_index": 1 + n,
+                    "seed": seed_for(f"shade-v{n}"),
+                },
+            },
+            (
+                f"{strings} strings shaded {depth:.0%} between {h0:02d}:00 and "
+                f"{h1:02d}:00 UTC. The whole-day per-string average hides this; "
+                "narrowing to those hours does not."
+            ),
+        )
+
+    # --- soiling, over windows long enough for it to be visible ----------
+    for n, (rate, cap) in enumerate([(0.005, 0.22), (0.003, 0.15), (0.008, 0.3)]):
+        variant(
+            f"soil-{n}",
+            n + 2,
+            "Performance has been sliding for weeks. What is behind it?",
+            "recoverable",
+            "soiling",
+            {
+                "kind": "soiling",
+                "params": {
+                    "rate_per_day": rate,
+                    "max_loss": cap,
+                    "seed": seed_for(f"soil-v{n}"),
+                },
+            },
+            f"Accumulation at {rate:.1%}/day capped at {cap:.0%}, reset by rain.",
+            window_extra_days=30,
+        )
+
+    # --- a drifting sensor: the look-alike that gets a clean array washed -
+    for n, (rate, cap) in enumerate(
+        [
+            (-0.006, -0.22),
+            (-0.003, -0.12),
+            (-0.009, -0.3),
+            (-0.002, -0.08),
+            (-0.005, -0.18),
+            (-0.004, -0.16),
+            (-0.007, -0.25),
+            (-0.0015, -0.06),
+        ]
+    ):
+        variant(
+            f"drift-{n}",
+            n,
+            "The performance ratio has been improving. Has something got better?",
+            "not_the_plant",
+            "sensor_drift",
+            {
+                "kind": "sensor_drift",
+                "params": {
+                    "drift_per_day": rate,
+                    "max_drift": cap,
+                    "seed": seed_for(f"drift-v{n}"),
+                },
+            },
+            (
+                "The signature is the OPPOSITE of soiling: a sensor reading low "
+                "makes the plant look better. The shallowest of these is "
+                "deliberately hard."
+            ),
+            window_extra_days=15,
+        )
+
+    # --- telemetry gaps, which are a logger problem, not a plant problem --
+    for n in range(6):
+        variant(
+            f"gap-{n}",
+            n,
+            "A stretch of production is missing from the record. What failed?",
+            "not_the_plant",
+            "telemetry_gap",
+            {"kind": "telemetry_gap", "params": {"seed": seed_for(f"gap-v{n}")}},
+            "Modelled on the real 35-day gap in this dataset in mid-2016.",
+        )
+
+    # --- the unresolvable pair, at ceilings both explanations reach -------
+    for n, (ceiling, kind) in enumerate(
+        [
+            (200.0, "curtailment"),
+            (185.0, "clipping"),
+            (210.0, "curtailment"),
+            (195.0, "clipping"),
+        ]
+    ):
+        variant(
+            # Offset by one so this sweep does not reproduce the hand-written
+            # ceiling case above verbatim — the same window with the same
+            # injection is a duplicate, and duplicates inflate a split's size
+            # without adding a single thing to measure.
+            f"ceiling-{n}",
+            n + 1,
+            "Output goes flat in the middle of the day. Is the inverter faulty?",
+            None,
+            None,
+            {
+                "kind": kind,
+                "params": (
+                    {"ceiling_kw": ceiling}
+                    if kind == "curtailment"
+                    else {"ac_ceiling_kw": ceiling}
+                )
+                | {"seed": seed_for(f"ceiling-v{n}")},
+            },
+            (
+                f"Ceiling at {ceiling:.0f} kW against a 260 kW inverter. Which "
+                "of the two applied it is not decidable from this plant's "
+                "telemetry, whichever one actually did — so the correct answer "
+                "is the same for both and committing is wrong either way."
+            ),
+            settled=False,
+            candidates=["clipping", "curtailment"],
+            resolving=(
+                "check the grid operator's dispatch log for these days, or the "
+                "inverter's own configuration history"
+            ),
+        )
+
+    # --- more real faults hiding inside periods that already look bad -----
+    for n, (string_index, fraction) in enumerate([(4, 0.75), (6, 0.6)]):
+        variant(
+            f"hidden-{n}",
+            n + 4,
+            "A poor stretch of weather, but something still looks off. Anything real?",
+            "fault",
+            "string_outage",
+            {
+                "kind": "string_outage",
+                "params": {
+                    "string_index": string_index,
+                    "fraction_lost": fraction,
+                    "seed": seed_for(f"hidden-v{n}"),
+                },
+            },
+            "A real fault inside a period that already looks bad innocently.",
+        )
+
     return cases
 
 

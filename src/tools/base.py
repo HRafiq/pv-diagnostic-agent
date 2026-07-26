@@ -23,12 +23,13 @@ only after it has looked at whether irradiance moved too.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 import pandas as pd
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 __all__ = [
     "ToolArgs",
@@ -157,6 +158,25 @@ class ToolResult(BaseModel):
         ),
     )
 
+    @model_validator(mode="after")
+    def _ledger_holds_only_real_numbers(self) -> ToolResult:
+        """No NaN or infinity in the provenance ledger, ever.
+
+        A NaN reaching the ledger is worse than a failed measurement: it
+        serialises to `null`, renders as a blank, and the agent reads the
+        absence as "nothing there" rather than "this could not be computed".
+        A tool that cannot measure something must raise `ToolError`.
+        """
+        bad = [k for k, v in self.values.items() if not math.isfinite(v)]
+        if bad:
+            raise ValueError(
+                f"{self.tool} put non-finite values in its ledger: "
+                + ", ".join(sorted(bad))
+                + ". Raise ToolError instead — a measurement that could not be "
+                "taken must not look like one that came out empty."
+            )
+        return self
+
     def digest(self, max_values: int = 24) -> str:
         """Compact rendering for an LLM prompt.
 
@@ -169,9 +189,7 @@ class ToolResult(BaseModel):
         if numbers:
             parts.append(f"  measured: {numbers}")
         if self.labels:
-            parts.append(
-                "  " + ", ".join(f"{k}={v}" for k, v in self.labels.items())
-            )
+            parts.append("  " + ", ".join(f"{k}={v}" for k, v in self.labels.items()))
         if self.caveats:
             parts.append("  caveats: " + "; ".join(self.caveats))
         return "\n".join(parts)

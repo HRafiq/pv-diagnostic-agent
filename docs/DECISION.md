@@ -542,3 +542,112 @@ boundary is the only place that knows something is about to be rendered. The
 jargon test scans template *source*, not just rendered output, which caught
 `run.hypotheses` sitting in an Alpine expression — a file the browser loads even
 though no user ever sees the word.
+
+---
+
+## 0025 — The knowledge layer is retrieved, never executed (2026-07-26)
+
+**Decision.** `src/knowledge/` holds two YAML files — what each cause does to a
+plant's telemetry, and what separates each pair of look-alikes. Nothing in the
+package compares a signature to a measurement, scores a match, or returns a
+cause. It loads, validates, and formats text. A loader validator rejects any
+entry that reads as a decision rule.
+
+**Why.** This is the sharpest circularity risk left in the project. If a
+signature said "worst string deviation over 3% means a string fault" and any
+code compared that number to a tool result, the accuracy figure would be
+measuring whether `fault_signatures.yaml` agrees with `simulator/injectors.py`
+— two files written by the same person in the same week. It would come out near
+100% and mean nothing.
+
+So the file describes *shapes and relationships*: "falls on some strings and not
+others", "recovers after rain", "the ratio rises, which a real loss cannot do".
+Physical constants are allowed ("roughly 0.4% per degree above 25 °C" is
+physics); cut-offs are not. Four regex patterns enforce it at load time, and a
+test confirms both that a rule fails to load and that a constant does not.
+
+**Retrieved after planning, never before.** The planner does not see the
+catalogue. If it did, it would enumerate whatever the catalogue contains and the
+evaluation would again be scoring agreement between two files. The loop matches
+the planner's own candidate causes onto signature keys, emits a `retrieval` step
+on the tape, and hands the result to the router and synthesiser as evidence.
+
+**Passed as an argument, not imported.** `investigate(..., knowledge=...)`
+accepts an empty `KnowledgeBase`, which is the step 9 ablation: the identical
+loop with retrieval removed. A layer that cannot be switched off cannot be shown
+to be worth anything.
+
+**Alternatives.** (a) Signature matching in code with a confidence score — this
+is a rules engine, and the project already has one as a baseline. (b) Putting
+the signatures in the planner's system prompt — same circularity, plus it makes
+the ablation impossible. (c) No knowledge layer at all — defensible, and the
+step 9 ablation may yet say so.
+
+---
+
+## 0026 — One vocabulary for causes across injector, golden set and knowledge (2026-07-26)
+
+**Decision.** `sensor_drift` and `telemetry_gap`, singular, everywhere —
+injector, golden case labels, knowledge keys, and the critic's look-alike
+checklist.
+
+**Why.** The knowledge base originally said `irradiance_sensor_drift` and
+`telemetry_gaps` because both are more precise. A test comparing the golden
+set's causes against the knowledge base's keys caught the mismatch. Left alone,
+`cause_accuracy` would compare labels that can never match and would report a
+lower number for a reason that has nothing to do with diagnosis. The failure is
+silent, which is why it is now a test rather than a convention.
+
+---
+
+## 0027 — The diagnostic gets the whole record, not just the window (2026-07-26)
+
+**Decision.** `MaterialisedCase` gained `full_record`: the entire ingested
+series with the case's perturbation spliced into its window. That is what the
+agent's `ToolContext` holds; the window is pinned by `start`/`end` on every tool
+call.
+
+**Why.** Found the moment `compare_to_trailing_baseline` and `weather_context`
+were pointed at the golden set: both raised on every case. The context had been
+built from the case *window*, so there was no month before it to compare against
+and no other year of the same calendar weeks. Two of the eighteen tools were
+unreachable, silently, and would have been scored as failures of the agent.
+
+It is also the more faithful setup. A real investigation is asked about a
+fortnight and has years of history to reach for; an engineer's first question is
+almost always "was it like this last month?".
+
+---
+
+## 0028 — Golden set to 86 cases, composition chosen not emergent (2026-07-26)
+
+**Decision.** 43 cases per split. Ten hand-written archetypes plus sweeps across
+windows and severities: string faults from a full outage to a 25% partial loss,
+shadows of varying depth and extent, soiling over 45-day windows, eight sensor
+drifts from steep to nearly invisible, six telemetry gaps, and five
+clipping/curtailment ceilings. Look-alikes are 41.9% of each split.
+
+**Why.** Ten clean archetypes measure whether a detector recognises archetypes.
+The interesting failures are marginal, and marginal cases exist only if severity
+is varied on purpose — hence the 25% string loss and the −0.0015/day sensor
+drift, both of which sit close to the noise floor by design.
+
+The look-alike share is a floor that composition is chosen to satisfy, not a
+number that fell out. Below 40%, a detector that alarms on any deficit scores
+well and the evaluation teaches nothing.
+
+A duplicate check runs over the built set: the first ceiling variant originally
+reproduced the hand-written ceiling case exactly, which would have inflated the
+split without adding anything to measure.
+
+**Cost.** An agent run over both splits is 86 investigations. At a target median
+of $0.15 per question that is roughly $13 per full evaluation, and the headline
+metrics are reported as mean ± spread over N=3 runs, so a complete figure is
+three times that.
+
+**Rules baseline on the expanded set:** macro-F1 **0.285 tuning / 0.414 held
+back**, false alarms 0.000 / 0.056, correct abstention **0.000** on both, missed
+faults 0.375 / 0.500. The abstention column is structural: the engine commits to
+the first rule that fires and has no way to hold two causes open. That is the
+gap the agent exists to fill, and it is now measured over five unresolvable
+cases per split rather than one.

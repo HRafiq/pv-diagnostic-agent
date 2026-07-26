@@ -109,7 +109,12 @@ def run_agent_engine(
     for case in cases:
         bundle = load_plant(case.system_id, DATA_DIR)
         materialised = materialise(case, DATA_DIR)
-        ctx = bundle.context(materialised.frame, scope=f"{bundle.meta.name} / array")
+        # The whole record, perturbed inside the case window. The agent is
+        # asked about the window and may reach outside it, exactly as an
+        # engineer would — several tools are meaningless without the history.
+        ctx = bundle.context(
+            materialised.full_record, scope=f"{bundle.meta.name} / array"
+        )
         client = build_client(load_models_config_cached(), settings.anthropic_api_key)
 
         started = time.monotonic()

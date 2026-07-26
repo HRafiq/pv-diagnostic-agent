@@ -38,6 +38,7 @@ from src.agent.nodes.prompts import plant_brief
 from src.agent.state import AgentState, CriticVerdict
 from src.clock import Clock
 from src.findings.models import Finding
+from src.knowledge import KnowledgeBase, load_knowledge
 from src.tools import ToolContext, ToolResult, slice_window
 from src.trace.models import TraceStep
 from src.trace.writer import TraceWriter
@@ -101,6 +102,7 @@ def investigate(
     max_tools_per_cycle: int = 8,
     trace_root: Path | str | None = None,
     critic: Critic | None = None,
+    knowledge: KnowledgeBase | None = None,
 ) -> InvestigationResult:
     """Run one investigation end to end.
 
@@ -111,6 +113,10 @@ def investigate(
             fails loudly at a known bound rather than draining the budget.
         critic: Absent at step 4. When supplied, a `send_back` verdict replans
             with the critic's instruction in hand.
+        knowledge: Domain knowledge retrieved for the planner's candidate
+            causes and handed to the router and synthesiser as evidence. Pass
+            `False`-y to run without it — that is the step 9 ablation, and the
+            whole reason it is an argument rather than an import.
     """
     window = slice_window(ctx.frame, start, end)
     brief = plant_brief(ctx, question, window)
@@ -140,6 +146,8 @@ def investigate(
         out.steps.append(writer.write(step) if writer else step)
 
     revision_request: str | None = None
+    knowledge_base = load_knowledge() if knowledge is None else knowledge
+    knowledge_brief = ""
 
     try:
         while True:
@@ -203,6 +211,25 @@ def investigate(
                 )
             )
 
+            # ---------------- retrieve --------------------------------------
+            # Knowledge is fetched *after* the planner has named its candidates
+            # and is never fed back into planning. If the planner saw the
+            # signature catalogue first it would enumerate whatever the
+            # catalogue contains, and the evaluation would be measuring whether
+            # the knowledge file and the fault injector agree.
+            matched = knowledge_base.match([h.cause for h in state.hypotheses])
+            if matched:
+                knowledge_brief = knowledge_base.brief_for(matched)
+                emit(
+                    TraceStep(
+                        kind="retrieval",
+                        node="knowledge",
+                        args={"matched_causes": matched, "cycle": state.cycle},
+                        result=("Looked up what is known about: " + ", ".join(matched)),
+                        was_planned=True,
+                    )
+                )
+
             # ---------------- route / execute -------------------------------
             stop_decision: RouterDecision | None = None
             for _ in range(max_tools_per_cycle):
@@ -213,6 +240,7 @@ def investigate(
                     out.results,
                     out.errors,
                     calls_remaining=max_tools_per_cycle - len(state.tools_called),
+                    knowledge=knowledge_brief,
                 )
                 if decision.stops:
                     stop_decision = decision
@@ -263,6 +291,7 @@ def investigate(
                 out.results,
                 out.errors,
                 revision_request=revision_request,
+                knowledge=knowledge_brief,
             )
             _accrue(out, synthesis.response)
             if stop_decision is not None:

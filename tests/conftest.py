@@ -23,7 +23,7 @@ GAMMA = -0.0045
 
 
 def synthetic_frame(
-    days: int = 14,
+    days: int = 60,
     start: str = "2017-04-01",
     peak_poa: float = 900.0,
     freq: str = "15min",
@@ -68,7 +68,13 @@ def synthetic_frame(
         "dc_power_kw": dc,
         "temp_ambient_c": ambient,
         "temp_module_c": module,
-        "wind_speed_ms": np.full(len(index), 1.5),
+        # Not a constant: a channel that never changes is legitimately
+        # indistinguishable from a frozen sensor, and `detect_stuck_channels`
+        # is right to say so. A fixture that trips it on every run would train
+        # the reader to ignore the finding.
+        "wind_speed_ms": 1.5
+        + 0.6 * np.sin(np.arange(len(index)) * 0.37)
+        + 0.2 * np.cos(np.arange(len(index)) * 0.11),
     }
     # Total string current is proportional to irradiance; each string carries an
     # equal share on a healthy array.
@@ -76,6 +82,19 @@ def synthetic_frame(
     for n in range(1, strings + 1):
         data[f"string_current_a_{n}"] = total_current / strings
     return pd.DataFrame(data, index=index)
+
+
+def two_year_frame(**kwargs: object) -> pd.DataFrame:
+    """The same span in two consecutive years.
+
+    A seasonal comparison — "was this window's weather unusual?" — needs the
+    same calendar weeks from somewhere else in the record. One year of data
+    cannot answer it, and the tool correctly says so rather than comparing a
+    window against itself.
+    """
+    first = synthetic_frame(start="2016-04-01", **kwargs)  # type: ignore[arg-type]
+    second = synthetic_frame(start="2017-04-01", **kwargs)  # type: ignore[arg-type]
+    return pd.concat([first, second])
 
 
 def context_for(frame: pd.DataFrame, **overrides: object) -> ToolContext:
@@ -104,7 +123,19 @@ def context_for(frame: pd.DataFrame, **overrides: object) -> ToolContext:
 
 @pytest.fixture
 def plant() -> pd.DataFrame:
+    """Sixty days, so a tool that needs history before its window has some.
+
+    Several measurements are only meaningful against a trailing baseline or
+    against the same calendar span elsewhere in the record. A fixture no longer
+    than one investigation window turns those into errors and quietly excludes
+    them from every contract test.
+    """
     return synthetic_frame()
+
+
+# The window the tool-contract tests measure, leaving 45 days of history in
+# front of it for anything that reaches backwards.
+WINDOW = {"start": "2017-05-16", "end": "2017-05-30"}
 
 
 @pytest.fixture

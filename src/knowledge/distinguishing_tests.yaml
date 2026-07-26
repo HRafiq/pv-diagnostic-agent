@@ -1,0 +1,222 @@
+# For each pair of causes that get mistaken for each other: what separates them.
+#
+# The companion to `fault_signatures.yaml`, and the more useful half. A
+# description of what a fault looks like on its own is nearly worthless — a
+# fault is only ever diagnosed *against its nearest look-alike*, and the useful
+# knowledge is the observation that tells the two apart.
+#
+# Same rule as the signatures file: no thresholds, no code matches this against
+# a measurement, and it is retrieved as evidence rather than executed as logic.
+# `measurement` names a tool the agent could call; that is a pointer, not a
+# dispatch table, and the agent remains free to reach a different way.
+#
+# `separable: false` entries are the ones that make this project worth
+# building. A pair that no available measurement can separate must produce
+# "not enough evidence" plus the name of the external check that would settle
+# it — not a confident answer with a plausible confidence number attached.
+
+version: 1
+
+pairs:
+
+  - between: [string_outage, shading]
+    why_confused: >
+      Both take part of the array down while the rest carries on, and both show
+      up as one string's share of current sitting below the others.
+    separable: true
+    measurement: per_mppt_current_balance
+    how: >
+      Run the per-string comparison twice: once across the whole day, once
+      narrowed to the hours the loss appears in. A failed string shows the same
+      gap in both, because it costs the same fraction from first light to last.
+      A shadow shows a gap only in the narrowed window and almost none across
+      the day, because it is present for three hours and absent for nine.
+    also: [time_of_day_profile, compare_string_profiles]
+    the_mistake: >
+      Reading the whole-day average alone. A shadow on three strings for three
+      hours moves the daily shares by almost nothing, so the array looks
+      balanced and the case is closed on a plant that has a tree growing into
+      it.
+
+  - between: [soiling, sensor_drift]
+    why_confused: >
+      Both are gradual, both are optical, both develop over weeks, and both are
+      fixed by cleaning something.
+    separable: true
+    measurement: check_clearsky_consistency
+    how: >
+      Ask which side of the ratio moved. Dirty modules leave the sensor honest,
+      so measured irradiance still agrees with the clear-sky model and the
+      performance ratio *falls*. A dirty sensor under-reports the light, so
+      measured irradiance drops below the clear-sky envelope while output holds
+      — and the performance ratio *rises*, which no real loss can do.
+    also: [check_night_offset, daily_performance_trend]
+    the_mistake: >
+      This is the pair that dispatches a wash crew to a clean array. The
+      direction of the performance ratio settles it in one measurement, and it
+      is free.
+
+  - between: [clipping, curtailment]
+    separable: false
+    why_confused: >
+      They are the same event from the plant's point of view. An inverter
+      holding its configured ceiling and a grid operator capping export both
+      produce a flat top on the power channel, and both back the array off its
+      maximum power point so DC and string current come down with the AC.
+    external_evidence: >
+      The grid operator's dispatch log for the days concerned, or the inverter's
+      own configuration history. Comparing against the same period a year
+      earlier narrows it — a ceiling that is new is more likely imposed — but
+      does not settle it, because inverter power limits are reconfigured for
+      grid-code compliance too.
+    how: >
+      There is no measurement in this tool set that separates them, and there is
+      no measurement in the plant's telemetry that could. The correct output is
+      "not enough evidence", both causes named with what each would mean
+      operationally, and the external check named.
+    the_mistake: >
+      Committing to "clipping" because the plateau is near the inverter rating.
+      It is the more common of the two, so the guess is often right — and being
+      right for no reason is how a genuinely curtailed plant goes years without
+      anyone claiming the compensation it is owed.
+
+  - between: [weather, soiling]
+    why_confused: >
+      Both reduce energy over a sustained period and both affect the whole array
+      evenly.
+    separable: true
+    measurement: compute_temp_corrected_pr
+    how: >
+      Divide the output by the light that actually arrived. Cloud takes energy
+      and irradiance down together and leaves the performance ratio where it
+      was; soiling takes energy down while irradiance holds, so the ratio falls.
+    also: [weather_context]
+    the_mistake: >
+      Reading kWh. Output tracks sunlight, so a cloudy fortnight and a soiled
+      array are indistinguishable in the monthly total and obvious the moment
+      the total is normalised.
+
+  - between: [seasonal_temperature_derating, soiling]
+    why_confused: >
+      Both show a performance ratio declining smoothly over weeks, and summer is
+      also the dry season in many climates, so they often arrive together.
+    separable: true
+    measurement: compute_temp_corrected_pr
+    how: >
+      Compare the corrected ratio against the raw one. If the corrected ratio is
+      flat while the raw one falls, the whole decline is heat and nothing is
+      wrong. If the corrected ratio falls too, the residue is something else and
+      is worth pursuing.
+    also: [check_module_temperature_sensor]
+    the_mistake: >
+      Trusting the correction without checking the sensor it rests on. The
+      correction divides by a factor built from measured module temperature; a
+      sensor reading high manufactures a deficit in the number that is supposed
+      to be trustworthy.
+
+  - between: [string_outage, soiling]
+    why_confused: >
+      Both produce a sustained loss with no time-of-day pattern and no change in
+      irradiance.
+    separable: true
+    measurement: per_mppt_current_balance
+    how: >
+      Ask whether the loss is shared. Dust sits on every module and takes every
+      string down by the same fraction, so the shares stay flat. A failed string
+      changes one share and pushes the rest up.
+    also: [soiling_recovery_pattern, string_onset_scan]
+    the_mistake: >
+      Concluding "uniform, therefore soiling" from balanced shares alone.
+      Balanced shares also describe a healthy array; the loss has to be
+      established first.
+
+  - between: [soiling, string_outage]
+    why_confused: >
+      Restated from the other direction because the *recovery* test is a
+      different observation from the balance test and worth having separately.
+    separable: true
+    measurement: soiling_recovery_pattern
+    how: >
+      Watch what happens after rain. Dust washes off, so the series is a
+      sawtooth that steps back up after wet days. A failed component never
+      recovers on its own, so its series is a step that stays down. Both can
+      produce the same monthly average.
+    the_mistake: >
+      Fitting a straight line to a sawtooth and reporting the slope. The slope
+      of a sawtooth is an artefact of where the window happens to start and end.
+
+  - between: [telemetry_gap, string_outage]
+    why_confused: >
+      Both remove energy from the record, and a naive performance ratio reports
+      a catastrophic loss for either.
+    separable: true
+    measurement: profile_data_quality
+    how: >
+      Count the well-lit intervals where irradiance logged and power did not. A
+      fault records a real low number; a gap records nothing at all. Any deficit
+      computed across a gap is a measurement of the logger.
+    the_mistake: >
+      Believing a deficit before checking completeness. This is not a subtle
+      failure — a month with a three-week gap reads as a 90% loss that never
+      happened.
+
+  - between: [inverter_fault, string_outage]
+    why_confused: >
+      Both reduce AC output with no change in irradiance and no time-of-day
+      pattern.
+    separable: true
+    measurement: dc_to_ac_conversion
+    how: >
+      Ask which side of the inverter the loss sits on. A failed string takes DC
+      and AC down together and leaves the conversion ratio alone. An inverter
+      problem moves the ratio between them and nothing else.
+    also: [per_mppt_current_balance]
+    the_mistake: >
+      Going straight to the strings. If the array is healthy the string
+      measurements all come back clean and the investigation stalls, when one
+      ratio would have pointed at the inverter immediately.
+
+  - between: [clipping, string_outage]
+    why_confused: >
+      Both reduce output on the brightest days, which is when the loss is
+      largest in kWh and most noticeable.
+    separable: true
+    measurement: check_ac_ceiling
+    how: >
+      Look at the shape. A ceiling is flat at the top of the day and absent at
+      the edges; a failed string costs the same fraction at every hour,
+      including the ones nowhere near any limit.
+    also: [time_of_day_profile]
+    the_mistake: >
+      Calling anything near the peak "clipping". Every smooth midday curve has
+      samples close to its own maximum. What makes a ceiling is that consecutive
+      samples stop changing while the sun keeps climbing.
+
+  - between: [seasonal_temperature_derating, string_outage]
+    why_confused: >
+      A summer performance ratio decline looks like a developing fault, and
+      arrives at the time of year when output is highest and most watched.
+    separable: true
+    measurement: compute_temp_corrected_pr
+    how: >
+      The corrected ratio removes the heat. Anything left is real; if nothing is
+      left, the plant is healthy and the alarm was the thermometer.
+    also: [per_mppt_current_balance]
+    the_mistake: >
+      Dispatching on the raw number in July. Every plant on earth is down in
+      July.
+
+  - between: [weather, telemetry_gap]
+    why_confused: >
+      Both leave a period with much less energy than its neighbours and no fault
+      anywhere in the equipment.
+    separable: true
+    measurement: profile_data_quality
+    how: >
+      Cloud leaves a complete record of a dim period; a gap leaves an incomplete
+      record of an unknown one. Check whether the readings are present before
+      asking what they say.
+    also: [weather_context]
+    the_mistake: >
+      Explaining a gap as bad weather because the month was in fact cloudy. Both
+      are true and only one of them is why the number is what it is.

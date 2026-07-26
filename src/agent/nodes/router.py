@@ -92,12 +92,14 @@ def route(
     results: list[ToolResult],
     errors: list[str],
     calls_remaining: int,
+    knowledge: str = "",
 ) -> RouterDecision:
     """Pick the next tool call."""
     already = ", ".join(state.tools_called) or "(none)"
     user = "\n".join(
         [
             brief,
+            *(["", "WHAT IS KNOWN ABOUT THESE CAUSES", knowledge] if knowledge else []),
             "",
             "TOOLS AVAILABLE",
             tool_catalogue_text(),

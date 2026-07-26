@@ -31,9 +31,9 @@ LOOKALIKE_CHECKLIST: tuple[str, ...] = (
     "seasonal_temperature_derating",
     "clipping",
     "curtailment",
-    "irradiance_sensor_drift",
+    "sensor_drift",
     "snow_or_dust_event",
-    "telemetry_gaps",
+    "telemetry_gap",
 )
 
 HypothesisStatus = Literal["open", "excluded", "supported", "still_standing"]

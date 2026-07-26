@@ -28,7 +28,13 @@ from src.tools import (
     tool_names,
 )
 from src.tools.base import ToolResult
-from tests.conftest import STRINGS, context_for, synthetic_frame
+from tests.conftest import (
+    STRINGS,
+    WINDOW,
+    context_for,
+    synthetic_frame,
+    two_year_frame,
+)
 
 
 # ===========================================================================
@@ -87,21 +93,24 @@ def test_every_number_in_a_summary_is_in_its_own_ledger(
     grounding check on the agent's answer is scoring against an incomplete
     ledger and the "zero fabricated numerics" target is unenforceable.
     """
-    result = run_tool(name, ctx, {})
+    result = run_tool(name, ctx, dict(WINDOW))
     report = check_numeric_grounding(result.summary, result.values)
     assert report.ok, f"{name} states ungrounded figures: {report.ungrounded}"
 
 
 @pytest.mark.parametrize("name", tool_names())
 def test_ledgers_hold_only_finite_numbers(name: str, ctx: ToolContext) -> None:
-    result = run_tool(name, ctx, {})
+    result = run_tool(name, ctx, dict(WINDOW))
     for key, value in result.values.items():
         assert np.isfinite(value), f"{name}.{key} is not a real number"
 
 
 @pytest.mark.parametrize("name", tool_names())
 def test_tools_are_deterministic(name: str, ctx: ToolContext) -> None:
-    assert run_tool(name, ctx, {}).values == run_tool(name, ctx, {}).values
+    assert (
+        run_tool(name, ctx, dict(WINDOW)).values
+        == run_tool(name, ctx, dict(WINDOW)).values
+    )
 
 
 # ===========================================================================
@@ -270,9 +279,10 @@ def test_a_capped_plant_reports_the_plateau(plant: pd.DataFrame) -> None:
     capped = plant.copy()
     capped["ac_power_kw"] = capped["ac_power_kw"].clip(upper=55.0)
     values = run_tool("check_ac_ceiling", context_for(capped), {}).values
+    days = pd.DatetimeIndex(plant.index).normalize().nunique()
     assert values["plateau_level_kw"] == pytest.approx(55.0, abs=0.01)
     assert values["flat_ceiling_share"] > 0.1
-    assert values["days_with_a_plateau"] == 14
+    assert values["days_with_a_plateau"] == days
     assert values["longest_flat_run_intervals"] > 3
 
 
@@ -309,8 +319,7 @@ def test_a_drifting_sensor_shows_a_falling_ratio(plant: pd.DataFrame) -> None:
     # making — a tool that called every overcast week a broken pyranometer
     # would be dispatching technicians to healthy weather stations.
     assert (
-        drift["ratio_change_across_window"]
-        < clean["ratio_change_across_window"] - 0.05
+        drift["ratio_change_across_window"] < clean["ratio_change_across_window"] - 0.05
     )
     assert drift["clearest_day_ratio"] < clean["clearest_day_ratio"] - 0.02
     assert drift["shortfall_vs_clearsky"] > clean["shortfall_vs_clearsky"]
@@ -484,9 +493,8 @@ def test_expected_output_measures_the_change_not_just_the_level(
     standing offset is unchanged.
     """
     dropped = plant.copy()
-    second_half = pd.DatetimeIndex(dropped.index) >= pd.Timestamp(
-        "2017-04-08", tz="UTC"
-    )
+    index = pd.DatetimeIndex(dropped.index)
+    second_half = index >= index[len(index) // 2]
     dropped.loc[second_half, "ac_power_kw"] *= 0.75
 
     values = run_tool("compute_expected_output", context_for(dropped), {}).values
@@ -521,3 +529,282 @@ def test_data_quality_on_a_complete_record_reports_full_coverage(
     values = run_tool("profile_data_quality", ctx, {}).values
     assert values["coverage"] == pytest.approx(1.0)
     assert values["lit_intervals_without_power"] == 0
+
+
+# ===========================================================================
+# compare_to_trailing_baseline
+# ===========================================================================
+def test_a_steady_plant_shows_no_change_against_its_own_past(
+    ctx: ToolContext,
+) -> None:
+    values = run_tool("compare_to_trailing_baseline", ctx, dict(WINDOW)).values
+    assert abs(values["change"]) < 0.02
+
+
+def test_a_new_loss_shows_up_against_the_preceding_month(
+    plant: pd.DataFrame,
+) -> None:
+    """The single most useful question about any deficit: is this new?"""
+    dropped = plant.copy()
+    onset = pd.Timestamp(WINDOW["start"], tz="UTC")
+    dropped.loc[pd.DatetimeIndex(dropped.index) >= onset, "ac_power_kw"] *= 0.85
+
+    values = run_tool(
+        "compare_to_trailing_baseline", context_for(dropped), dict(WINDOW)
+    ).values
+    assert values["change"] < -0.08
+    assert values["change_over_spread"] > 3
+
+
+def test_a_long_standing_condition_reads_as_no_change(plant: pd.DataFrame) -> None:
+    """A plant that has run at 0.78 for two years is not developing a fault.
+
+    The baseline is the immediately preceding stretch, so a loss that predates
+    it is inside it. The tool says so in a caveat rather than reporting a
+    change it cannot see.
+    """
+    always = plant.copy()
+    always["ac_power_kw"] *= 0.85
+    result = run_tool("compare_to_trailing_baseline", context_for(always), dict(WINDOW))
+    assert abs(result.values["change"]) < 0.02
+    assert any("began before the window" in c for c in result.caveats)
+
+
+def test_the_baseline_refuses_when_there_is_no_history(plant: pd.DataFrame) -> None:
+    with pytest.raises(ToolError, match="not enough to compare against"):
+        run_tool(
+            "compare_to_trailing_baseline",
+            context_for(plant),
+            {"start": "2017-04-01", "end": "2017-04-10"},
+        )
+
+
+# ===========================================================================
+# dc_to_ac_conversion
+# ===========================================================================
+def test_an_array_side_loss_leaves_the_conversion_ratio_alone(
+    plant: pd.DataFrame,
+) -> None:
+    """A failed string takes DC and AC down together. That is what separates it
+    from an inverter problem, and it is the only measurement that does."""
+    array_loss = plant.copy()
+    for column in ("dc_power_kw", "ac_power_kw"):
+        array_loss[column] *= 0.8
+
+    clean = run_tool("dc_to_ac_conversion", context_for(plant), dict(WINDOW)).values
+    lossy = run_tool(
+        "dc_to_ac_conversion", context_for(array_loss), dict(WINDOW)
+    ).values
+    assert lossy["median_conversion"] == pytest.approx(
+        clean["median_conversion"], abs=1e-6
+    )
+
+
+def test_an_inverter_problem_moves_the_conversion_ratio(plant: pd.DataFrame) -> None:
+    failing = plant.copy()
+    failing["ac_power_kw"] *= 0.8
+    values = run_tool("dc_to_ac_conversion", context_for(failing), dict(WINDOW)).values
+    assert values["median_conversion"] < 0.8
+
+
+def test_conversion_refuses_without_both_channels(plant: pd.DataFrame) -> None:
+    bare = plant.drop(columns=["dc_power_kw"])
+    with pytest.raises(ToolError, match="both DC and AC"):
+        run_tool("dc_to_ac_conversion", context_for(bare), dict(WINDOW))
+
+
+# ===========================================================================
+# compare_string_profiles
+# ===========================================================================
+def test_a_string_scaled_by_a_constant_keeps_its_shape(plant: pd.DataFrame) -> None:
+    """Level and shape are different measurements, and a fault may move only
+    one. A blown fuse scales the whole day and leaves the shape matching."""
+    scaled = plant.copy()
+    scaled["string_current_a_2"] *= 0.5
+    values = run_tool(
+        "compare_string_profiles", context_for(scaled), dict(WINDOW)
+    ).values
+    assert values["shape_match_string_2"] > 0.99
+    assert values["level_string_2"] < 0.6
+
+
+def test_a_shadow_bends_a_string_out_of_shape(plant: pd.DataFrame) -> None:
+    shaded = plant.copy()
+    hours = pd.DatetimeIndex(shaded.index).hour
+    shaded.loc[(hours >= 7) & (hours < 10), "string_current_a_2"] *= 0.4
+
+    clean = run_tool("compare_string_profiles", context_for(plant), dict(WINDOW)).values
+    dark = run_tool("compare_string_profiles", context_for(shaded), dict(WINDOW)).values
+    assert dark["shape_match_string_2"] < clean["shape_match_string_2"] - 0.02
+    assert dark["lowest_shape_match_string"] == 2
+
+
+# ===========================================================================
+# check_module_temperature_sensor
+# ===========================================================================
+def test_a_sane_temperature_sensor_agrees_with_the_weather(ctx: ToolContext) -> None:
+    values = run_tool("check_module_temperature_sensor", ctx, dict(WINDOW)).values
+    assert abs(values["median_offset_from_model_c"]) < 12
+    assert values["median_rise_above_ambient_c"] > 5
+
+
+def test_a_sensor_reading_high_is_visible(plant: pd.DataFrame) -> None:
+    """This sits underneath every corrected performance ratio in the project.
+
+    A module sensor reading 10 K high manufactures a deficit in the number that
+    is supposed to be the trustworthy one.
+    """
+    biased = plant.copy()
+    biased["temp_module_c"] += 10.0
+    clean = run_tool(
+        "check_module_temperature_sensor", context_for(plant), dict(WINDOW)
+    ).values
+    hot = run_tool(
+        "check_module_temperature_sensor", context_for(biased), dict(WINDOW)
+    ).values
+    assert hot["median_offset_from_model_c"] - clean["median_offset_from_model_c"] == (
+        pytest.approx(10.0, abs=0.1)
+    )
+
+
+def test_a_stuck_temperature_sensor_reports_one_distinct_value(
+    plant: pd.DataFrame,
+) -> None:
+    stuck = plant.copy()
+    stuck["temp_module_c"] = 30.0
+    values = run_tool(
+        "check_module_temperature_sensor", context_for(stuck), dict(WINDOW)
+    ).values
+    assert values["distinct_values"] == 1
+
+
+def test_the_temperature_check_says_so_when_there_is_no_sensor(
+    plant: pd.DataFrame,
+) -> None:
+    bare = plant.drop(columns=["temp_module_c"])
+    with pytest.raises(ToolError, match="no measured module temperature"):
+        run_tool("check_module_temperature_sensor", context_for(bare), dict(WINDOW))
+
+
+# ===========================================================================
+# weather_context
+# ===========================================================================
+def test_a_dim_window_reads_below_the_seasonal_norm() -> None:
+    dim = two_year_frame()
+    inside = (
+        pd.DatetimeIndex(dim.index) >= pd.Timestamp(WINDOW["start"], tz="UTC")
+    ) & (
+        pd.DatetimeIndex(dim.index) <= pd.Timestamp(WINDOW["end"] + " 23:59", tz="UTC")
+    )
+    dim.loc[inside, "poa_wm2"] *= 0.5
+    values = run_tool("weather_context", context_for(dim), dict(WINDOW)).values
+    assert values["relative_to_norm"] < 0.7
+    assert values["dim_days"] > 5
+
+
+def test_weather_context_admits_a_record_too_short_to_compare(
+    plant: pd.DataFrame,
+) -> None:
+    """One year of record cannot say whether an April was unusual.
+
+    Saying so is the honest answer. Comparing the window against itself and
+    reporting +0.0% would be a confident statement made from nothing.
+    """
+    result = run_tool(
+        "weather_context",
+        context_for(plant),
+        {"start": "2017-04-01", "end": "2017-04-14"},
+    )
+    assert any("only once" in c for c in result.caveats)
+    assert result.values["relative_to_norm"] == pytest.approx(1.0)
+
+
+# ===========================================================================
+# detect_stuck_channels and check_night_offset
+# ===========================================================================
+def test_a_frozen_channel_is_found(plant: pd.DataFrame) -> None:
+    """The quietest failure in the set: a plausible number, forever."""
+    stuck = plant.copy()
+    stuck["poa_wm2"] = stuck["poa_wm2"].where(
+        pd.DatetimeIndex(stuck.index) < pd.Timestamp("2017-05-20", tz="UTC"), 600.0
+    )
+    values = run_tool("detect_stuck_channels", context_for(stuck), dict(WINDOW)).values
+    assert values["stuck_share_poa_wm2"] > 0.5
+
+
+def test_a_healthy_plant_has_no_stuck_channels(ctx: ToolContext) -> None:
+    values = run_tool("detect_stuck_channels", ctx, dict(WINDOW)).values
+    assert values["worst_stuck_share"] < 0.05
+
+
+def test_night_readings_are_near_zero_on_a_healthy_plant(ctx: ToolContext) -> None:
+    values = run_tool("check_night_offset", ctx, dict(WINDOW)).values
+    assert abs(values["median_night_irradiance_wm2"]) < 1.0
+    assert values["median_night_ac_kw"] == pytest.approx(0.0, abs=0.01)
+
+
+def test_a_biased_sensor_shows_a_night_offset(plant: pd.DataFrame) -> None:
+    """A pyranometer reading +8 at midnight is reading +8 too high all day,
+    which drags the whole plant's performance ratio down."""
+    biased = plant.copy()
+    biased["poa_wm2"] = biased["poa_wm2"] + 8.0
+    values = run_tool("check_night_offset", context_for(biased), dict(WINDOW)).values
+    assert values["median_night_irradiance_wm2"] == pytest.approx(8.0, abs=0.5)
+
+
+# ===========================================================================
+# soiling_recovery_pattern and string_onset_scan
+# ===========================================================================
+def test_a_permanent_loss_shows_no_recovery(plant: pd.DataFrame) -> None:
+    """A failed component never comes back on its own. That is what separates
+    it from dirt, and the monthly average cannot tell them apart."""
+    broken = plant.copy()
+    broken.loc[
+        pd.DatetimeIndex(broken.index) >= pd.Timestamp("2017-05-01", tz="UTC"),
+        "ac_power_kw",
+    ] *= 0.8
+    values = run_tool(
+        "soiling_recovery_pattern",
+        context_for(broken),
+        {"start": "2017-05-01", "end": "2017-05-30"},
+    ).values
+    assert values["mean_change_after_a_wash"] < 0.02
+
+
+def test_string_onset_scan_dates_the_change(plant: pd.DataFrame) -> None:
+    broken = plant.copy()
+    onset = pd.Timestamp("2017-05-20", tz="UTC")
+    broken.loc[pd.DatetimeIndex(broken.index) >= onset, "string_current_a_5"] *= 0.2
+
+    result = run_tool(
+        "string_onset_scan",
+        context_for(broken),
+        {"start": "2017-05-10", "end": "2017-05-30"},
+    )
+    assert result.values["most_changed_string"] == 5
+    assert result.values["its_share_change"] < -0.05
+    assert result.labels["onset_date"] == "2017-05-20"
+
+
+def test_a_string_already_dead_before_the_window_reports_no_change(
+    plant: pd.DataFrame,
+) -> None:
+    """The degenerate case that produced a NaN in the ledger.
+
+    A string flat at zero for the whole window has no "before", so the mean of
+    zero days is undefined. Reporting a change of zero is right; reporting NaN
+    would have serialised to `null` and read as "nothing there".
+    """
+    dead = plant.copy()
+    dead["string_current_a_3"] = 0.0
+    values = run_tool("string_onset_scan", context_for(dead), dict(WINDOW)).values
+    assert values["share_change_string_3"] == 0.0
+    assert all(np.isfinite(v) for v in values.values())
+
+
+def test_a_ledger_with_a_nan_cannot_be_constructed() -> None:
+    """A failed measurement must raise, never return an empty-looking number."""
+    from src.tools.base import ToolResult
+
+    with pytest.raises(ValueError, match="non-finite"):
+        ToolResult(tool="x", summary="y", values={"pr": float("nan")})

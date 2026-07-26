@@ -30,7 +30,7 @@ from src.agent.nodes.router import ROUTE_SCHEMA, RouterDecision
 from src.agent.nodes.synthesizer import SYNTHESIS_SCHEMA
 from src.agent.state import AgentState, CriticVerdict, Hypothesis
 from src.clock import FrozenClock
-from src.tools import ToolContext, tool_names
+from src.tools import ToolContext, run_tool, tool_names
 from src.trace.writer import read_trace
 from tests.conftest import context_for, synthetic_frame
 
@@ -166,7 +166,13 @@ def test_a_full_pass_plans_measures_and_answers(
         clock,
     )
 
-    assert [s.kind for s in out.steps] == ["plan", "tool", "tool", "answer"]
+    assert [s.kind for s in out.steps] == [
+        "plan",
+        "retrieval",
+        "tool",
+        "tool",
+        "answer",
+    ]
     assert out.tools_called == [
         "compute_temp_corrected_pr",
         "per_mppt_current_balance",
@@ -217,7 +223,12 @@ def test_a_router_narrowing_the_window_overrides_the_default(
         ctx,
         clock,
     )
-    assert out.results[0].values["intervals_scored"] < 200
+    # Three hours of a twelve-hour day, so roughly a quarter of what the
+    # unnarrowed call would have scored.
+    whole_day = run_tool("per_mppt_current_balance", ctx, {}).values
+    assert (
+        out.results[0].values["intervals_scored"] < 0.4 * whole_day["intervals_scored"]
+    )
 
 
 # ===========================================================================
@@ -302,8 +313,9 @@ def test_the_router_cannot_self_report_was_planned(
         ctx,
         clock,
     )
-    assert out.steps[1].kind == "adaptive"
-    assert out.steps[1].was_planned is False
+    adaptive = next(s for s in out.steps if s.kind == "adaptive")
+    assert adaptive.node == "check_ac_ceiling"
+    assert adaptive.was_planned is False
 
 
 def test_an_unplanned_step_with_no_reason_says_so_rather_than_inventing_one(
@@ -316,7 +328,8 @@ def test_an_unplanned_step_with_no_reason_says_so_rather_than_inventing_one(
         ctx,
         clock,
     )
-    assert "without stating a reason" in (out.steps[1].reason_for_choosing or "")
+    adaptive = next(s for s in out.steps if s.kind == "adaptive")
+    assert "without stating a reason" in (adaptive.reason_for_choosing or "")
 
 
 def test_the_trace_model_refuses_an_unjustified_departure() -> None:
@@ -369,7 +382,7 @@ def test_a_router_naming_a_tool_that_does_not_exist_stops_the_cycle(
         clock,
     )
     assert out.tools_called == []
-    assert [s.kind for s in out.steps] == ["plan", "answer"]
+    assert [s.kind for s in out.steps] == ["plan", "retrieval", "answer"]
 
 
 def test_the_per_cycle_cap_stops_a_router_that_never_stops(
@@ -677,9 +690,9 @@ _ALL_LOOKALIKES = (
     "seasonal_temperature_derating",
     "clipping",
     "curtailment",
-    "irradiance_sensor_drift",
+    "sensor_drift",
     "snow_or_dust_event",
-    "telemetry_gaps",
+    "telemetry_gap",
 )
 
 
@@ -699,8 +712,8 @@ def test_the_tape_is_written_and_reloadable(
     )
     assert out.trace_path is not None and out.trace_path.exists()
     replayed = list(read_trace(out.trace_path))
-    assert [s.kind for s in replayed] == ["plan", "tool", "answer"]
-    assert [s.step_index for s in replayed] == [0, 1, 2]
+    assert [s.kind for s in replayed] == ["plan", "retrieval", "tool", "answer"]
+    assert [s.step_index for s in replayed] == [0, 1, 2, 3]
     # Simulated time from the injected clock, never wall clock.
     assert all(s.timestamp == clock.now() for s in replayed)
 
@@ -886,3 +899,78 @@ def test_investigation_result_json_round_trips_for_the_dashboard(
     payload = json.loads(pd.Series([s.model_dump_json() for s in out.steps]).iloc[0])
     assert payload["kind"] == "plan"
     assert payload["was_planned"] is True
+
+
+# ===========================================================================
+# The knowledge layer
+# ===========================================================================
+def test_knowledge_is_retrieved_after_planning_never_before(
+    ctx: ToolContext, clock: FrozenClock
+) -> None:
+    """The planner must not see the signature catalogue.
+
+    If it did, it would enumerate whatever the catalogue contains and the
+    evaluation would be measuring whether the knowledge file and the fault
+    injector agree — two files written by the same person in the same week.
+    """
+    client = ScriptedClient(
+        replies={
+            "planner": [
+                a_plan(
+                    ["compute_temp_corrected_pr"],
+                    [("H1", "dust on the modules"), ("H2", "a string has failed")],
+                )
+            ],
+            "router": [a_call("compute_temp_corrected_pr"), a_stop()],
+            "synthesizer": [a_settled_answer()],
+        }
+    )
+    investigate("q", ctx, client, clock, investigation_id="INV-K")
+
+    planner_prompt = next(u for node, _, u in client.calls if node == "planner")
+    router_prompt = next(u for node, _, u in client.calls if node == "router")
+
+    assert "Told apart from" not in planner_prompt
+    assert "WHAT IS KNOWN ABOUT THESE CAUSES" not in planner_prompt
+    assert "Told apart from" in router_prompt
+
+
+def test_the_lookup_appears_on_the_tape(ctx: ToolContext, clock: FrozenClock) -> None:
+    out = run(
+        [a_plan(["check_ac_ceiling"], [("H1", "clipping"), ("H2", "curtailment")])],
+        [a_call("check_ac_ceiling"), a_stop()],
+        [an_unsettled_answer()],
+        ctx,
+        clock,
+    )
+    lookup = next(s for s in out.steps if s.kind == "retrieval")
+    assert lookup.node == "knowledge"
+    assert "clipping" in (lookup.args or {}).get("matched_causes", [])
+    assert "curtailment" in (lookup.args or {}).get("matched_causes", [])
+
+
+def test_the_knowledge_layer_can_be_switched_off_for_the_ablation(
+    ctx: ToolContext, clock: FrozenClock
+) -> None:
+    """Step 9 has to be able to measure whether retrieval is worth anything,
+    which means running the identical loop without it."""
+    from src.knowledge import KnowledgeBase
+
+    empty = KnowledgeBase(signatures={}, tests=())
+    client = ScriptedClient(
+        replies={
+            "planner": [
+                a_plan(
+                    ["check_ac_ceiling"], [("H1", "clipping"), ("H2", "curtailment")]
+                )
+            ],
+            "router": [a_call("check_ac_ceiling"), a_stop()],
+            "synthesizer": [an_unsettled_answer()],
+        }
+    )
+    out = investigate(
+        "q", ctx, client, clock, investigation_id="INV-ABL", knowledge=empty
+    )
+    assert not any(s.kind == "retrieval" for s in out.steps)
+    router_prompt = next(u for node, _, u in client.calls if node == "router")
+    assert "WHAT IS KNOWN ABOUT THESE CAUSES" not in router_prompt
