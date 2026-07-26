@@ -230,11 +230,15 @@ corpus/raw/
 corpus/*.txt
 corpus/*.md
 !corpus/README.md
-traces/
+# Anchored to the repo root on purpose. A bare `traces/` would also match
+# `src/trace*/`-style directories at any depth and silently drop source files.
+/traces/
 .env
 *.parquet
 *.h5
 *.nc
 # Keep the directories themselves in git.
 !**/.gitkeep
-findings/
+# Anchored: unanchored, this matched `src/findings/` too and kept two modules
+# out of git entirely. tests/test_repo_tracking.py now guards against a repeat.
+/findings/

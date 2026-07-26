@@ -948,3 +948,44 @@ plausible-looking, wrong agency metrics.
 
 That is the case for having written both, in that order, more than any argument
 about ergonomics.
+
+---
+
+## 0040 — `.gitignore` patterns are anchored, and a test enforces it (2026-07-26)
+
+**The bug.** `.gitignore` carried a bare `findings/` line, written for the
+runtime findings output directory at the repo root. A directory pattern with no
+leading slash matches at *every* depth, so it also matched `src/findings/`.
+`src/findings/build.py` and `src/findings/store.py` were never committed —
+through step 8, step 9, step 10, step 12 and step 13, across five pushes.
+
+**Why nothing caught it.** Every local signal was green. `git status` was clean,
+because the files were ignored rather than untracked. The full suite passed,
+because the files were on disk. The pushes succeeded. The repository was broken
+only for someone cloning it, which is exactly the population that cannot report
+the failure until they hit it — here, a fresh clone that failed to import
+`src.findings.build` while `python -m pip list` showed every dependency present.
+
+**Decision.** Two changes:
+
+1. Project-specific directory patterns are anchored to the repo root —
+   `/findings/`, `/traces/`. The upstream Python `.gitignore` block is left
+   alone; its bare `build/`, `lib/`, `dist/` entries carry the same hazard and
+   are now covered by the guard below rather than by editing a vendored file.
+2. `tests/test_repo_tracking.py` shells out to `git check-ignore` over every
+   source file under `src`, `simulator`, `eval`, `dashboard`, `tests` and
+   `config`, and fails if any is excluded. A second test catches the adjacent
+   case — a file that escapes `.gitignore` but was never `git add`ed, inside a
+   package that is otherwise committed.
+
+**Alternative considered and rejected.** A blanket `!/src/**` negation at the
+end of `.gitignore`. It would have re-included `src/**/__pycache__` too, and it
+fixes the symptom in one directory while leaving `eval/` and `dashboard/`
+exposed. The test covers all of them and names the offending pattern in its
+failure message.
+
+**The general lesson, which is the reason this gets an entry.** The project's
+other mechanical guard — `test_no_wall_clock.py` — exists for the same class of
+defect: a mistake that produces no error, only a quietly wrong result. Ignored
+source files belong in that class. Green tests say the code on this disk works;
+they say nothing about whether that code is what the repository contains.

@@ -345,10 +345,16 @@ def api_investigation(investigation_id: str) -> dict[str, Any]:
     # rendered directly and the interface carries no jargon (CLAUDE.md). The
     # rename happens here rather than in the template so the banned word never
     # reaches a file the browser loads.
+    #
+    # `TraceStep.args` is `dict[str, object]`, so the ledger comes back untyped.
+    # It is narrowed rather than cast: a malformed tape should render an empty
+    # list, not raise inside a request handler.
     latest_plan = next((s for s in reversed(steps) if s.kind == "plan"), plan_step)
+    raw_causes = (latest_plan.args or {}).get("hypotheses") if latest_plan else None
     possible_causes = [
         {**h, "status": "excluded" if h.get("id") in excluded else h.get("status")}
-        for h in ((latest_plan.args or {}).get("hypotheses", []) if latest_plan else [])
+        for h in (raw_causes if isinstance(raw_causes, list) else [])
+        if isinstance(h, dict)
     ]
 
     return {
