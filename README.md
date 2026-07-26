@@ -21,10 +21,15 @@ causes, says so and names the cheap test that would.
 The output is one of three instructions: **send someone, schedule something, or
 do nothing.** The third is the one nobody sells and often the most valuable.
 
-> **Status: steps 0–10 and 12 of 13 complete.** Real data ingested, physics validated,
-> fault injector and evaluation harness running with a rules baseline scored,
-> and the agent loop taking measurements end to end with its reasoning on
-> screen. See *Build progress* below.
+> **Status: 12 of 13 steps complete. The agent has not been scored.**
+>
+> No `ANTHROPIC_API_KEY` was available in the environment this was built in, so
+> every number published here comes from the physics, the rules baseline, the
+> fault injector or the retrieval index — all of which run without one. The
+> evaluation harness, the golden set, the metrics, both ablations and the
+> rules-vs-agent comparison are complete and tested; **the agent column is empty
+> because it has not been run, not because it is pending analysis.** One command
+> fills it in. See *Results*.
 
 ---
 
@@ -83,27 +88,38 @@ cp .env.example .env          # ANTHROPIC_API_KEY needed only for agent nodes
 ```
 
 ```bash
-pytest                                    # 555 tests
+pytest                                    # 567 tests
 ruff check . && mypy src eval simulator   # lint + types
+```
 
-python watcher.py status                  # clock, models, config
-python watcher.py run --until 2019-06-30 --step 1D
+**Everything below runs without an API key**, including the whole test suite:
 
+```bash
 python -m src.data.cli ingest --system 4902 --years 2016 2017
-python -m eval.runner build
-python -m eval.runner run --engine rules            # no API key needed
-python -m eval.runner run --engine agent --split tuning
-python -m eval.runner compare --split heldback     # rules vs agent, side by side
+python -m eval.runner build                        # 86 golden cases
+python -m eval.runner run --engine rules --split both
 python -m eval.runner retrieval                    # retrieval ablation
 
 python watcher.py run --until 2016-09-01 --step 14D --engine rules
-python watcher.py findings
+python watcher.py findings                         # finds the real 2016 gap
 
-uvicorn dashboard.app:app --reload        # http://127.0.0.1:8000
+uvicorn dashboard.app:app --reload                 # http://127.0.0.1:8000
 ```
 
-Physics, detectors, the simulator, the dashboard and the whole test suite run
-without an API key. Only the agent nodes need one.
+**These need one.** They are the empty column in *Results*:
+
+```bash
+cp .env.example .env                               # add ANTHROPIC_API_KEY
+python -m eval.runner run --engine agent --split tuning
+python -m eval.runner compare --split heldback     # rules vs agent
+python -m eval.runner experiments --runs 3         # both ablations, mean ± spread
+```
+
+A full `compare --split both` is 86 investigations at roughly $0.15 each, and
+headline metrics are reported over three runs — so budget ~$40 for a complete
+figure, or start with `--split tuning` for about $7. Hard caps of 40 calls and
+$1.00 per investigation are enforced before each call, so a runaway loop fails
+loudly rather than quietly billing you.
 
 ---
 
@@ -137,6 +153,59 @@ the dashboard reads.
 
 ---
 
+## Results
+
+### What has been measured
+
+**The rules baseline, on 43 held-back cases:**
+
+| | tuning | held back |
+| --- | --- | --- |
+| Overall accuracy | 0.345 | 0.469 |
+| False alarms on look-alikes | 0.056 | 0.056 |
+| **Correct "not enough evidence"** | **0.000** | **0.000** |
+| Missed real faults | 0.375 | 0.438 |
+
+That zero is structural, not a tuning failure. The engine commits to the first
+rule that fires and cannot represent "two causes survive and here is the test
+that separates them" — so on all five unresolvable cases per split it confidently
+answers "clipping", and on the curtailed ones it is confidently wrong in the
+direction that costs money. **It is the single number to watch when the agent
+column is filled in.**
+
+Its agency metrics read exactly as they should: one distinct tool trajectory
+across all 86 runs, an unplanned-measurement rate of 0.000, zero self-initiated
+abstentions. That is the metric correctly identifying a pipeline. If the agent
+comes back looking like this, the agent is a pipeline too.
+
+**Retrieval, on 18 golden queries:** fusing BM25 with a vector index beats either
+alone by about 0.09 of reciprocal rank. The reranker adds 0.009 — one query
+moving one position — so on this evidence it is close to cost without benefit.
+"Right document in top 10" is **not reported**, because on a 23-chunk corpus it
+scores 1.000 for every configuration including ones that have learned nothing;
+the harness detects that and drops the column rather than printing a number a
+reader might quote.
+
+**The physics, over two untouched years:** performance ratio 0.857 as measured,
+0.893 corrected to 25 °C. Raw PR swings 0.80–0.95 across the year while the
+corrected figure stays flat at 0.86–0.92 — every one of those raw summer troughs
+is a false alarm waiting to be dispatched on.
+
+### What has not
+
+- **The agent's accuracy.** Needs a key.
+- **Whether retrieval changes it.** `--no-knowledge` runs the identical loop
+  without it. The retrieval numbers say the right passage comes back; they say
+  nothing about whether the agent diagnoses better for having read it.
+- **Whether the critic earns its cost.** `--no-review` runs the identical loop
+  without it.
+
+`docs/FINDINGS.md` has the full detail, including a section on the bugs the
+evaluation found in *itself* — each of which would have made a published accuracy
+figure meaningless.
+
+---
+
 ## Build progress
 
 | Step | Deliverable | State |
@@ -152,11 +221,17 @@ the dashboard reads.
 | 8 | Watcher: sweep, findings store with lifecycle, energy ranking. Tab 2 | **done** |
 | 9 | RAG layer + retrieval golden set + ablation | **done** |
 | 10 | Saved analyses registry with golden-case enforcement | **done** |
-| 11 | Full evaluation, agency metrics, both experiments — **needs an API key** | |
+| 11 | Full evaluation, agency metrics, both experiments | harness done, **needs a key** |
 | 12 | LangGraph port; verify identical golden-set outputs | **done** |
-| 13 | README with honest results, including whatever the ablations showed | next |
+| 13 | README with honest results, including whatever the ablations showed | **done** |
 
 Each step is gated: it stops for review before the next one starts.
+
+Both loops ship. `src/agent/loop_plain.py` is the reference implementation;
+`src/agent/loop_graph.py` is the LangGraph port, held to sixteen exact-equality
+tests against it. `docs/LANGGRAPH_TRADEOFF.md` records what the framework
+actually bought — checkpointing, which an 86-case evaluation that dies at case 60
+genuinely wants — and what it cost.
 
 ---
 

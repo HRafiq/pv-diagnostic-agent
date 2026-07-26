@@ -257,3 +257,66 @@ that matters, it needs an API key, and `--no-knowledge` runs the identical loop
 without it. The numbers above say retrieval finds the right passage; they say
 nothing about whether the agent diagnoses better for having read it. If it turns
 out not to, the layer should come out.
+
+---
+
+## The two experiments (step 11)
+
+```bash
+python -m eval.runner experiments --runs 3 --split heldback
+```
+
+**Not run.** Both need an API key. The harness is complete and tested; what
+follows is what it will report and why it is built that way.
+
+### Reported as mean ± spread, never as one number
+
+`CLAUDE.md` scopes determinism: physics, tools, injection and retrieval are
+bitwise reproducible; the planner, router, synthesiser and critic are not. A
+single figure from the non-deterministic half is not a result, so every headline
+metric is the mean over N fresh runs with its sample spread beside it.
+
+N = 3 is the brief's number and it is small — three runs give a spread that is
+indicative, not a confidence interval. A run count of 1 prints a spread of
+0.000, and the harness prints a note saying that means "measured once", not
+"perfectly stable".
+
+### The four configurations
+
+| | review | knowledge |
+| --- | --- | --- |
+| full | on | on |
+| no review | **off** | on |
+| no knowledge | on | **off** |
+| neither | off | off |
+
+Each row removes exactly one thing from `full`, and a test asserts it: an
+ablation that changes two things at once attributes nothing. All four run the
+*identical* loop — `critic=False` and an empty `KnowledgeBase` are constructor
+arguments, not separate code paths — which is what makes the difference between
+two rows attributable to the layer rather than to the implementation.
+
+### What each one answers
+
+**"no review" prices the critic.** The critic is the most expensive node per
+investigation and the one whose value is easiest to assert and hardest to show.
+The number to read is `correct_abstention_rate`: the critic's whole job is
+refusing to accept an answer that has not excluded its look-alikes, so if
+abstention does not move when it is removed, it is decoration.
+
+**"no knowledge" prices retrieval.** Step 9 established that the right passage
+comes back. This establishes whether the agent diagnoses better for having read
+it. **If it does not, the layer should come out** — and that would be the more
+interesting result of the two.
+
+**"neither" checks the two are not substituting for each other.** If removing
+either alone costs little but removing both costs a lot, they are covering the
+same failure and one of them is redundant.
+
+### The number to read first, in every table
+
+`correct_abstention_rate`. The rules baseline scores **0.000** on it
+structurally, so it is the one column where an agent has somewhere to be better
+rather than merely different. Overall accuracy is reported and is deliberately
+not the headline: a detector that alarms on any deficit scores well on clean
+faults and is useless in the field.

@@ -238,6 +238,52 @@ def _cmd_compare(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_experiments(args: argparse.Namespace) -> int:
+    """Run the ablations over N fresh runs and report mean ± spread.
+
+    A single number from a non-deterministic system is not a result
+    (CLAUDE.md), so nothing here reports one.
+    """
+    from eval.experiments import ABLATIONS, ablation_table, repeat, summarise_runs
+
+    try:
+        cases = _load_cases(args.split)
+    except FileNotFoundError as exc:
+        print(exc)
+        return 1
+
+    wanted = (
+        {k: v for k, v in ABLATIONS.items() if k in args.only}
+        if args.only
+        else ABLATIONS
+    )
+    results = []
+    for label, options in wanted.items():
+        print(f"\n=== {label} — {args.runs} run(s) over {len(cases)} cases ===")
+        try:
+            runs = repeat(label, run_agent_engine, cases, n=args.runs, **options)
+        except RuntimeError as exc:
+            print(f"\ncannot run the experiments: {exc}")
+            return 1
+        results.append(summarise_runs(runs, args.split))
+
+    print("\n" + ablation_table(results).to_string(index=False))
+    print(
+        "\n  read correct_abstention_rate first: it is the column the rules "
+        "baseline scores 0.000 on structurally, so it is where an agent has "
+        "somewhere to be better rather than merely different."
+    )
+    if args.runs < 3:
+        print(
+            f"\n  NOTE: {args.runs} run(s). A spread of 0.000 here means "
+            "'measured once', not 'perfectly stable'."
+        )
+    if args.out:
+        Path(args.out).write_text(json.dumps([r.as_row() for r in results], indent=2))
+        print(f"\n  wrote {args.out}")
+    return 0
+
+
 def _cmd_retrieval(args: argparse.Namespace) -> int:
     """Score retrieval over the golden queries and print the ablation."""
     from eval.retrieval import ablation, score_retrieval
@@ -395,6 +441,22 @@ def main(argv: list[str] | None = None) -> int:
     p_ret.add_argument("--k", type=int, default=10)
     p_ret.add_argument("--out", type=str, default=None)
     p_ret.set_defaults(func=_cmd_retrieval)
+
+    p_exp = sub.add_parser(
+        "experiments",
+        help="Ablate the agent against itself over N runs. Needs an API key.",
+    )
+    p_exp.add_argument(
+        "--split", default="heldback", choices=["tuning", "heldback", "both"]
+    )
+    p_exp.add_argument(
+        "--runs", type=int, default=3, help="Fresh runs per configuration."
+    )
+    p_exp.add_argument(
+        "--only", nargs="*", default=None, help="Subset of configurations to run."
+    )
+    p_exp.add_argument("--out", type=str, default=None)
+    p_exp.set_defaults(func=_cmd_experiments)
 
     args = parser.parse_args(argv)
     return int(args.func(args))
