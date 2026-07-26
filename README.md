@@ -21,7 +21,7 @@ causes, says so and names the cheap test that would.
 The output is one of three instructions: **send someone, schedule something, or
 do nothing.** The third is the one nobody sells and often the most valuable.
 
-> **Status: steps 0–9 of 13 complete.** Real data ingested, physics validated,
+> **Status: steps 0–10 and 12 of 13 complete.** Real data ingested, physics validated,
 > fault injector and evaluation harness running with a rules baseline scored,
 > and the agent loop taking measurements end to end with its reasoning on
 > screen. See *Build progress* below.
@@ -83,7 +83,7 @@ cp .env.example .env          # ANTHROPIC_API_KEY needed only for agent nodes
 ```
 
 ```bash
-pytest                                    # 528 tests
+pytest                                    # 555 tests
 ruff check . && mypy src eval simulator   # lint + types
 
 python watcher.py status                  # clock, models, config
@@ -151,10 +151,10 @@ the dashboard reads.
 | 7 | Rules baseline through the shared tools + comparison harness | **done** |
 | 8 | Watcher: sweep, findings store with lifecycle, energy ranking. Tab 2 | **done** |
 | 9 | RAG layer + retrieval golden set + ablation | **done** |
-| 10 | Saved analyses registry with golden-case enforcement | next |
-| 11 | Full evaluation, agency metrics, both experiments, `docs/FINDINGS.md` | |
-| 12 | LangGraph port; verify identical golden-set outputs | |
-| 13 | README with honest results, including whatever the ablations showed | |
+| 10 | Saved analyses registry with golden-case enforcement | **done** |
+| 11 | Full evaluation, agency metrics, both experiments — **needs an API key** | |
+| 12 | LangGraph port; verify identical golden-set outputs | **done** |
+| 13 | README with honest results, including whatever the ablations showed | next |
 
 Each step is gated: it stops for review before the next one starts.
 

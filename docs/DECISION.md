@@ -873,3 +873,78 @@ carries it through the full lifecycle: new, ongoing, ongoing, then resolved
 after three quiet sweeps. That is an unlabelled event found by the detectors
 rather than by a label, and it is the only ground truth in the project that did
 not come from an injector.
+
+---
+
+## 0037 — Retrieval reports reciprocal rank, not "right document in top 10" (2026-07-26)
+
+**Decision.** `RetrievalReport` detects when `k` is a large fraction of the
+corpus and switches its headline metric. The ablation table drops the saturated
+column rather than printing it.
+
+**Why.** The intended headline is recall@10. On a 23-chunk corpus it returns 43%
+of everything and scores **1.000 for every configuration**, including ones that
+have learned nothing. Printing that table would produce the most flattering and
+least honest number in the project, and it would be quoted.
+
+The threshold is `k / N > 0.2`. Arbitrary, and stated as arbitrary; what is not
+arbitrary is that some such guard has to exist, because the corpus is small by
+circumstance and a future reader has no way to know that from the number alone.
+
+**What the ablation says once the saturated column is gone.** Fusion earns its
+place — hybrid beats either stage alone by ~0.09 of reciprocal rank. The
+reranker adds 0.009, which on 18 queries is one query moving one position, so on
+this evidence it is close to cost without benefit and stays only because the
+corpus is too small to conclude either way.
+
+**The dense stage is not semantic, and the queries say so.** No embedding API is
+reachable from this environment and no local transformer is installed, so the
+"vector" stage is character n-gram TF-IDF. It is a genuinely different signal
+from BM25 — it matches sub-word overlap — but it will not match "the array is
+dirty" to "soiling". The golden set includes paraphrase queries specifically so
+that limitation appears as a number (0.657 against 0.917 on direct queries)
+rather than being taken on trust.
+
+---
+
+## 0038 — Saved analyses are level 1 only, and cannot be saved unevaluated (2026-07-26)
+
+**Decision.** An `AnalysisSpec` is a question plus a selection over existing
+tools. Not a new tool, not new orchestration, not generated code. Saving is
+refused unless every named tool exists and every cited golden case exists.
+
+**Why.** `golden_case_ids` being non-empty is already a model validator; this
+adds that the ids are real. "Evaluated against case G-999" is unevaluated with
+extra steps, and an agent factory that produces unevaluated agents defeats the
+whole point of the project — it manufactures things that look like diagnostics
+and have never been scored.
+
+Level 2 (new tools) and level 3 (new orchestration) are deliberately absent. Each
+would need its own evaluation for every entry, and there is no honest way to
+build that at this scale.
+
+---
+
+## 0039 — LangGraph is kept, and checkpointing is why (2026-07-26)
+
+**Decision.** Both loops ship. `loop_plain` is the reference implementation and
+what the tests are written against; `loop_graph` is the port, gated by sixteen
+exact-equality tests in `tests/test_langgraph_port.py`.
+
+**Why the port at all.** Writing the plain loop first (DECISION 0018) made this
+answerable. The full argument is in `docs/LANGGRAPH_TRADEOFF.md`; the short
+version is that the declared graph and named branches are real but modest gains,
+the restated bound and the copied state are real but modest costs, and
+**checkpointing is what tips it** — an 86-case evaluation that dies at case 60
+currently starts again from case 1.
+
+**The bug the equivalence test caught immediately.** LangGraph copies state
+between nodes rather than threading one object through, so the port read its
+local `AgentState` back after `invoke()` and reported an untouched run: no tools
+called, no cycles used. Every equivalence test failed at once. In a hand-written
+loop that bug does not exist to be made, and without the plain loop to compare
+against it would have been invisible — the graph would simply have produced
+plausible-looking, wrong agency metrics.
+
+That is the case for having written both, in that order, more than any argument
+about ergonomics.
