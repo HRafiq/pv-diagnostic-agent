@@ -232,8 +232,212 @@
       </div>
     </template>
 
+    <!-- ================= INVESTIGATE TAB ================= -->
+    <template x-if="state && active === 'investigate'">
+      <div>
+        <template x-if="!runs">
+          <div class="panel">
+            <p class="lede">Loading investigations…</p>
+          </div>
+        </template>
+
+        <template x-if="runs && !runs.investigations.length">
+          <div class="panel">
+            <h2>No investigations yet</h2>
+            <p class="lede">
+              This tab replays what the agent did; it never starts a run. Traces
+              are written to <code x-text="runs.traces_dir"></code> by
+              <code>watcher.py</code> and by the evaluation harness, and they are
+              not committed — they are output, not source.
+            </p>
+            <p class="lede" x-show="!runs.api_key_present">
+              No <code>ANTHROPIC_API_KEY</code> is set, so the agent cannot run.
+              Everything else on this dashboard works without one.
+            </p>
+            <p class="lede">
+              Produce some with
+              <code>python -m eval.runner run --engine agent --split tuning</code>.
+            </p>
+          </div>
+        </template>
+
+        <template x-if="runs && runs.investigations.length">
+          <div>
+            <div class="controls">
+              <label>
+                <span>Investigation</span>
+                <select x-model="runId" @change="loadRun()">
+                  <template x-for="r in runs.investigations" :key="r.id">
+                    <option :value="r.id"
+                            x-text="r.id + ' — ' + (r.title || r.question || '') +
+                                    (r.settled ? '' : '  (not enough evidence)')"></option>
+                  </template>
+                </select>
+              </label>
+              <span class="loading" x-show="loading">loading…</span>
+            </div>
+
+            <template x-if="run">
+              <div>
+                <div class="tiles">
+                  <div class="tile">
+                    <span class="tile-label">Measurements taken</span>
+                    <span class="tile-value" x-text="run.counters.measurements"></span>
+                    <span class="tile-note">by the agent, one at a time</span>
+                  </div>
+                  <div class="tile" :class="{ 'tile-warn': run.counters.unplanned > 0 }">
+                    <span class="tile-label">Outside the opening plan</span>
+                    <span class="tile-value" x-text="run.counters.unplanned"></span>
+                    <span class="tile-note">followed the evidence instead</span>
+                  </div>
+                  <div class="tile">
+                    <span class="tile-label">Review rounds</span>
+                    <span class="tile-value" x-text="run.counters.review_cycles"></span>
+                    <span class="tile-note">answer sent back and redone</span>
+                  </div>
+                  <div class="tile">
+                    <span class="tile-label">Cost</span>
+                    <span class="tile-value" x-text="'$' + run.counters.cost_usd.toFixed(3)"></span>
+                    <span class="tile-note">
+                      <span x-text="run.counters.tokens.toLocaleString()"></span> tokens
+                    </span>
+                  </div>
+                  <div class="tile">
+                    <span class="tile-label">Time spent</span>
+                    <span class="tile-value" x-text="run.counters.seconds.toFixed(1) + 's'"></span>
+                    <span class="tile-note">waiting on the model</span>
+                  </div>
+                </div>
+
+                <!-- the answer -->
+                <template x-if="run.answer">
+                  <div class="panel" :class="run.answer.settled ? '' : 'panel-unsettled'">
+                    <h2 x-text="run.answer.title || 'Answer'"></h2>
+
+                    <template x-if="run.answer.settled">
+                      <p class="verdict">
+                        <span class="pill" x-text="prettyCategory(run.answer.category)"></span>
+                        <strong x-text="run.answer.cause"></strong>
+                        <span class="muted" x-show="run.answer.confidence !== null"
+                              x-text="'confidence ' + Number(run.answer.confidence).toFixed(2)"></span>
+                      </p>
+                    </template>
+
+                    <!--
+                      An unsettled finding shows no single cause and no
+                      confidence. That is not a display choice; a Finding
+                      carrying both cannot be constructed.
+                    -->
+                    <template x-if="!run.answer.settled">
+                      <div>
+                        <p class="verdict">
+                          <span class="pill pill-open">Not enough evidence</span>
+                          <span>The measurements did not separate these:</span>
+                        </p>
+                        <ul class="causes">
+                          <template x-for="c in run.answer.candidate_causes" :key="c.cause">
+                            <li>
+                              <strong x-text="c.cause"></strong>
+                              — <span x-text="c.consequence_if_true"></span>
+                            </li>
+                          </template>
+                        </ul>
+                        <p class="lede">
+                          <strong>What would settle it:</strong>
+                          <span x-text="run.answer.resolving_measurement"></span>
+                        </p>
+                      </div>
+                    </template>
+
+                    <p x-text="run.answer.answer"></p>
+                    <p class="lede">
+                      <strong>Recommended:</strong>
+                      <span x-text="run.answer.recommended_action"></span>
+                    </p>
+
+                    <template x-if="run.answer.ungrounded_figures &&
+                                    run.answer.ungrounded_figures.length">
+                      <p class="panel-error">
+                        Figures with no source measurement behind them:
+                        <span class="mono" x-text="run.answer.ungrounded_figures.join(', ')"></span>
+                      </p>
+                    </template>
+                    <template x-if="run.answer.build_error">
+                      <p class="panel-error" x-text="run.answer.build_error"></p>
+                    </template>
+                  </div>
+                </template>
+
+                <!-- possible causes ledger -->
+                <template x-if="run.possible_causes.length">
+                  <div class="panel">
+                    <h2>Possible causes considered</h2>
+                    <table class="grid">
+                      <thead>
+                        <tr><th>Cause</th><th>If it were true</th><th>Status</th></tr>
+                      </thead>
+                      <tbody>
+                        <template x-for="h in run.possible_causes" :key="h.id">
+                          <tr>
+                            <td x-text="h.cause"></td>
+                            <td x-text="h.consequence_if_true"></td>
+                            <td>
+                              <span class="pill"
+                                    :class="h.status === 'excluded' ? 'pill-out' : 'pill-open'"
+                                    x-text="h.status === 'excluded' ? 'ruled out' : 'still standing'"></span>
+                            </td>
+                          </tr>
+                        </template>
+                      </tbody>
+                    </table>
+                  </div>
+                </template>
+
+                <!-- the tape -->
+                <div class="panel">
+                  <h2>What the agent did</h2>
+                  <ol class="tape">
+                    <template x-for="s in run.steps" :key="s.index">
+                      <li class="tape-step" :class="'tape-' + s.kind">
+                        <div class="tape-head">
+                          <span class="tape-kind" x-text="stepLabel(s)"></span>
+                          <span class="tape-node mono" x-text="s.node"></span>
+                          <span class="tape-cost"
+                                x-show="s.cost_usd > 0"
+                                x-text="'$' + s.cost_usd.toFixed(3)"></span>
+                        </div>
+                        <template x-if="!s.was_planned">
+                          <p class="tape-why">
+                            <span class="pill pill-unplanned">unplanned</span>
+                            <span x-text="s.reason_for_choosing"></span>
+                          </p>
+                        </template>
+                        <p class="tape-result" x-text="s.result"></p>
+                        <template x-if="s.excludes && s.excludes.length">
+                          <p class="tape-why">
+                            ruled out: <span class="mono" x-text="s.excludes.join(', ')"></span>
+                          </p>
+                        </template>
+                        <template x-if="s.args && s.args.caveats && s.args.caveats.length">
+                          <ul class="caveats">
+                            <template x-for="c in s.args.caveats" :key="c">
+                              <li x-text="c"></li>
+                            </template>
+                          </ul>
+                        </template>
+                      </li>
+                    </template>
+                  </ol>
+                </div>
+              </div>
+            </template>
+          </div>
+        </template>
+      </div>
+    </template>
+
     <!-- ================= PLACEHOLDER TABS ================= -->
-    <template x-if="state && active !== 'plant'">
+    <template x-if="state && active !== 'plant' && active !== 'investigate'">
       <div class="panel">
         <h2 x-text="tabLabel(active)"></h2>
         <p class="lede">
@@ -248,6 +452,7 @@
       return {
         state: null, plant: null, error: null, loading: false,
         active: 'plant', showTable: false,
+        runs: null, run: null, runId: null,
         theme: document.documentElement.dataset.theme || 'dark',
         systemId: null, startDate: '', endDate: '', resolution: '1D',
 
@@ -258,6 +463,27 @@
         tabLabel(key) { const t = this.tabs.find(t => t.key === key); return t ? t.label : ''; },
         tabStep(key) { const t = this.tabs.find(t => t.key === key); return t ? t.step : ''; },
         fmt(v, d) { return (v === null || v === undefined) ? '—' : v.toFixed(d); },
+
+        // No ML vocabulary reaches the interface (CLAUDE.md). "adaptive" is
+        // what the trace calls it; a plant manager reads "unplanned".
+        stepLabel(s) {
+          return {
+            plan: 'Plan',
+            tool: 'Measurement',
+            adaptive: 'Measurement (unplanned)',
+            retrieval: 'Looked something up',
+            critic: 'Review',
+            answer: 'Answer',
+          }[s.kind] || s.kind;
+        },
+        prettyCategory(c) {
+          return {
+            fault: 'Send someone',
+            recoverable: 'Schedule maintenance',
+            by_design: 'Working as designed',
+            not_the_plant: 'Not the plant',
+          }[c] || c || '';
+        },
 
         toggleTheme() {
           this.theme = this.theme === 'dark' ? 'light' : 'dark';
@@ -273,6 +499,7 @@
             const r = await fetch('/api/state');
             if (!r.ok) throw new Error('HTTP ' + r.status);
             this.state = await r.json();
+            await this.loadRuns();
             if (this.state.systems.length) {
               const s = this.state.systems[0];
               this.systemId = s.system_id;
@@ -281,6 +508,31 @@
               await this.loadPlant();
             }
           } catch (e) { this.error = e.message; }
+        },
+
+        async loadRuns() {
+          const r = await fetch('/api/investigations');
+          if (!r.ok) {
+            this.runs = { investigations: [], traces_dir: '(unavailable)',
+                          api_key_present: false };
+            return;
+          }
+          this.runs = await r.json();
+          if (this.runs.investigations.length && !this.runId) {
+            this.runId = this.runs.investigations[0].id;
+            await this.loadRun();
+          }
+        },
+
+        async loadRun() {
+          if (!this.runId) return;
+          this.loading = true;
+          try {
+            const r = await fetch(`/api/investigation/${this.runId}`);
+            if (!r.ok) throw new Error((await r.json()).detail || ('HTTP ' + r.status));
+            this.run = await r.json();
+          } catch (e) { this.error = e.message; }
+          finally { this.loading = false; }
         },
 
         async loadPlant() {

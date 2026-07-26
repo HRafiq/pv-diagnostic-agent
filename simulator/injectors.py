@@ -100,14 +100,38 @@ def _string_columns(frame: pd.DataFrame) -> list[str]:
     )
 
 
+def _string_power_columns(frame: pd.DataFrame) -> list[str]:
+    return sorted(
+        (c for c in frame.columns if c.startswith("string_dc_power_kw_")),
+        key=lambda c: int(c.rsplit("_", 1)[-1]),
+    )
+
+
 def _scale_power(
-    frame: pd.DataFrame, mask: pd.Series, factor: pd.Series
+    frame: pd.DataFrame,
+    mask: pd.Series,
+    factor: pd.Series,
+    scale_strings: bool = False,
 ) -> tuple[pd.DataFrame, float]:
-    """Apply a multiplicative loss to DC and AC power over a window."""
+    """Apply a multiplicative loss to DC and AC power over a window.
+
+    Args:
+        scale_strings: Whether every per-string channel moves with the loss.
+            This is a physical question, not a convenience: a loss upstream of
+            the array (dust on the glass) or at the inverter (a power limit
+            backing the array off its maximum power point) reduces the current
+            on *every* string, while a blown fuse or a shadow reduces it on
+            some. Leaving the string channels alone for a whole-plant loss
+            implies an inverter efficiency that cannot exist, and an agent that
+            noticed would be reading a bug in the injector rather than physics.
+    """
     out = frame.copy()
     hours = _interval_hours(frame)
     lost = 0.0
-    for column in ("dc_power_kw", "ac_power_kw"):
+    columns = ["dc_power_kw", "ac_power_kw"]
+    if scale_strings:
+        columns += _string_columns(out) + _string_power_columns(out)
+    for column in columns:
         if column not in out:
             continue
         before = pd.to_numeric(out[column], errors="coerce")
@@ -207,6 +231,7 @@ def inject_shading(
     hour_end: int = 10,
     depth: float = 0.35,
     string_index: int = 1,
+    strings_affected: int = 1,
     seed: int = 0,
 ) -> tuple[pd.DataFrame, InjectionRecord]:
     """A new obstruction shades part of the array at a fixed time of day.
@@ -214,6 +239,13 @@ def inject_shading(
     The discriminator against a string fault is *time-of-day dependence*: a
     blown fuse costs the same fraction all day, while a shadow tracks the sun
     and disappears by mid-morning.
+
+    `strings_affected` matters more than it looks. A shadow is a physical object
+    with an extent — a new building, a tree line, a row of modules in front —
+    and it falls across a contiguous group of strings, not a single one. Shading
+    one string of seven for three hours costs about 1.5% of the window's energy,
+    which is under the noise of every measurement in the tool set; the case
+    would be unlearnable and the evaluation would be scoring coin flips.
     """
     out = frame.copy()
     columns = _string_columns(out)
@@ -227,10 +259,19 @@ def inject_shading(
     profile = pd.Series(0.0, index=out.index)
     profile[shaded] = depth
     if columns:
-        target = columns[(string_index - 1) % len(columns)]
-        out[target] = pd.to_numeric(out[target], errors="coerce") * (1.0 - profile)
-        share = 1.0 / len(columns)
+        count = max(1, min(strings_affected, len(columns)))
+        first = (string_index - 1) % len(columns)
+        targets = [columns[(first + n) % len(columns)] for n in range(count)]
+        for target in targets:
+            out[target] = pd.to_numeric(out[target], errors="coerce") * (1.0 - profile)
+            power_column = f"string_dc_power_kw_{target.rsplit('_', 1)[-1]}"
+            if power_column in out:
+                out[power_column] = pd.to_numeric(
+                    out[power_column], errors="coerce"
+                ) * (1.0 - profile)
+        share = count / len(columns)
     else:
+        targets = []
         share = 1.0
 
     out, lost = _scale_power(out, shaded, 1.0 - profile * share)
@@ -243,14 +284,17 @@ def inject_shading(
             "hour_end": hour_end,
             "depth": depth,
             "string_index": string_index,
+            "strings_affected": len(targets),
+            "share_of_array": round(share, 4),
         },
         start=start,
         end=end,
-        affected_columns=("dc_power_kw", "ac_power_kw"),
+        affected_columns=(*targets, "dc_power_kw", "ac_power_kw"),
         energy_lost_kwh=lost,
         note=(
-            f"obstruction shades the array between {hour_start:02d}:00 and "
-            f"{hour_end:02d}:00 — the loss tracks time of day, unlike a fuse"
+            f"obstruction shades {len(targets)} of {len(columns)} strings "
+            f"between {hour_start:02d}:00 and {hour_end:02d}:00 — the loss "
+            "tracks time of day, unlike a fuse"
         ),
     )
 
@@ -299,7 +343,11 @@ def inject_soiling(
         loss_by_day[day] = accumulated
 
     profile = days.map(loss_by_day).fillna(0.0).astype(float)
-    out, lost = _scale_power(out, mask, 1.0 - profile)
+    # Dust sits on the glass, upstream of everything electrical, so it costs
+    # every string the same fraction of its current. That uniformity is the
+    # signature that separates soiling from a string fault — and it only exists
+    # in the data if the injection actually applies it.
+    out, lost = _scale_power(out, mask, 1.0 - profile, scale_strings=True)
     _ = run_rng(seed)
     return out, InjectionRecord(
         kind="soiling",
@@ -313,7 +361,7 @@ def inject_soiling(
         },
         start=start,
         end=end,
-        affected_columns=("dc_power_kw", "ac_power_kw"),
+        affected_columns=("dc_power_kw", "ac_power_kw", "every string channel"),
         energy_lost_kwh=lost,
         note=(
             f"transmission loss accumulating at {rate_per_day:.2%}/day, "
@@ -341,28 +389,67 @@ def inject_inverter_clipping(
 
     Note it is deliberately indistinguishable, on the power channel alone, from
     `inject_curtailment` below. Separating them needs evidence from somewhere
-    else entirely — which is the whole point of the pair.
+    else entirely — which is the whole point of the pair. Both apply the *same*
+    cap through the same code path for exactly that reason: if one of them left
+    a channel untouched that the other moved, the pair would be separable by a
+    quirk of the simulator rather than by physics, and the case would be
+    measuring the injector.
     """
-    out = frame.copy()
-    mask = _window_mask(out, start, end)
-    hours = _interval_hours(out)
-    before = pd.to_numeric(out["ac_power_kw"], errors="coerce")
-    after = before.copy()
-    after[mask] = before[mask].clip(upper=ac_ceiling_kw)
-    out["ac_power_kw"] = after
-    _ = run_rng(seed)
-    return out, InjectionRecord(
+    return _apply_power_cap(
+        frame,
+        start,
+        end,
+        ac_ceiling_kw,
         kind="clipping",
         category="by_design",
         params={"ac_ceiling_kw": ac_ceiling_kw},
-        start=start,
-        end=end,
-        affected_columns=("ac_power_kw",),
-        energy_lost_kwh=_energy_delta(before, after, hours),
         note=(
             f"AC output capped at the {ac_ceiling_kw:.0f} kW inverter rating — "
             "by design, not a fault"
         ),
+        seed=seed,
+    )
+
+
+def _apply_power_cap(
+    frame: pd.DataFrame,
+    start: str,
+    end: str,
+    ceiling_kw: float,
+    kind: str,
+    category: str,
+    params: dict[str, Any],
+    note: str,
+    seed: int,
+) -> tuple[pd.DataFrame, InjectionRecord]:
+    """Hold AC output at a ceiling, and back the array off to match.
+
+    An inverter that cannot export more power does not keep drawing it: it
+    walks the array up its I-V curve away from the maximum power point, so DC
+    power and every string current fall with the AC output. Capping AC alone
+    would leave the frame implying an inverter running at 60% efficiency all
+    midday — a fingerprint of the simulator, not of a power limit, and one an
+    agent could learn instead of the physics.
+    """
+    out = frame.copy()
+    mask = _window_mask(out, start, end)
+    before = pd.to_numeric(out["ac_power_kw"], errors="coerce")
+
+    factor = pd.Series(1.0, index=out.index)
+    capped = mask & (before > ceiling_kw)
+    factor[capped] = (ceiling_kw / before[capped]).astype(float)
+
+    out, lost = _scale_power(out, mask, factor, scale_strings=True)
+    _ = run_rng(seed)
+    return out, InjectionRecord(
+        kind=kind,
+        category=category,
+        params={**params, "intervals_capped": int(capped.sum())},
+        start=start,
+        end=end,
+        affected_columns=("ac_power_kw", "dc_power_kw", "every string channel"),
+        energy_lost_kwh=lost,
+        note=note,
     )
 
 
@@ -380,26 +467,19 @@ def inject_curtailment(
     sun — so the agent cannot tell them apart from the power channel alone, and
     must reach for the comparison against the same period last year.
     """
-    out = frame.copy()
-    mask = _window_mask(out, start, end)
-    hours = _interval_hours(out)
-    before = pd.to_numeric(out["ac_power_kw"], errors="coerce")
-    after = before.copy()
-    after[mask] = before[mask].clip(upper=ceiling_kw)
-    out["ac_power_kw"] = after
-    _ = run_rng(seed)
-    return out, InjectionRecord(
+    return _apply_power_cap(
+        frame,
+        start,
+        end,
+        ceiling_kw,
         kind="curtailment",
         category="not_the_plant",
         params={"ceiling_kw": ceiling_kw},
-        start=start,
-        end=end,
-        affected_columns=("ac_power_kw",),
-        energy_lost_kwh=_energy_delta(before, after, hours),
         note=(
             f"export capped at {ceiling_kw:.0f} kW by the grid operator — "
             "identical ceiling to clipping, different cause and different action"
         ),
+        seed=seed,
     )
 
 

@@ -175,3 +175,51 @@ code {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.85em;
 }
+
+/* ---- the investigation tape ----
+   A vertical run of steps with a rail down the left. The only entry that is
+   coloured differently is the unplanned one: it is the visible evidence that
+   the agent departed from its plan, and it is the whole reason this view
+   exists rather than a summary card. */
+.tape { list-style: none; margin: 0; padding: 0 0 0 1.25rem; border-left: 2px solid var(--line); }
+
+.tape-step { position: relative; padding: 0.35rem 0 1.1rem 0.4rem; }
+.tape-step::before {
+  content: ""; position: absolute; left: -1.72rem; top: 0.85rem;
+  width: 9px; height: 9px; border-radius: 50%;
+  background: var(--panel); border: 2px solid var(--line);
+}
+.tape-plan::before, .tape-answer::before { background: var(--accent); border-color: var(--accent); }
+.tape-adaptive::before { background: var(--warn); border-color: var(--warn); }
+.tape-critic::before { background: var(--ink-dim); border-color: var(--ink-dim); }
+
+.tape-head { display: flex; align-items: baseline; gap: 0.6rem; flex-wrap: wrap; }
+.tape-kind { font-weight: 600; font-size: 0.82rem; letter-spacing: 0.03em; text-transform: uppercase; }
+.tape-adaptive .tape-kind { color: var(--warn); }
+.tape-node { font-size: 0.82rem; color: var(--ink-dim); }
+.tape-cost { margin-left: auto; font-size: 0.78rem; color: var(--ink-dim); font-variant-numeric: tabular-nums; }
+.tape-result { margin: 0.35rem 0 0; white-space: pre-wrap; }
+.tape-why { margin: 0.3rem 0 0; font-size: 0.9rem; color: var(--ink-dim); }
+
+.caveats { margin: 0.4rem 0 0; padding-left: 1.1rem; font-size: 0.85rem; color: var(--ink-dim); }
+.caveats li { margin: 0.15rem 0; }
+
+/* ---- verdict pills ---- */
+.pill {
+  display: inline-block; padding: 0.08rem 0.5rem; border-radius: 999px;
+  font-size: 0.78rem; font-weight: 600;
+  background: var(--panel-2); border: 1px solid var(--line); color: var(--ink);
+}
+.pill-open { border-color: var(--warn); color: var(--warn); }
+.pill-out { border-color: var(--line); color: var(--ink-dim); }
+.pill-unplanned { border-color: var(--warn); color: var(--warn); margin-right: 0.4rem; }
+
+.verdict { display: flex; align-items: baseline; gap: 0.6rem; flex-wrap: wrap; margin: 0.2rem 0 0.7rem; }
+.verdict .muted { color: var(--ink-dim); font-size: 0.9rem; }
+
+/* An unsettled answer is marked on the panel itself, so "we could not tell"
+   never renders with the same authority as a settled diagnosis. */
+.panel-unsettled { border-left: 3px solid var(--warn); }
+
+.causes { margin: 0.2rem 0 0.8rem; padding-left: 1.15rem; }
+.causes li { margin: 0.2rem 0; }

@@ -31,6 +31,7 @@ from src.data.quality import profile_quality
 from src.data.sources import SystemMetadata
 from src.physics.modelchain import ExpectationModel, module_gamma_pdc
 from src.physics.performance import compute_pr, pr_timeseries
+from src.trace.writer import read_trace
 from src.viz import specs
 
 HERE = Path(__file__).resolve().parent
@@ -43,7 +44,7 @@ templates = Jinja2Templates(directory=str(HERE / "templates"))
 TABS: list[dict[str, Any]] = [
     {"key": "plant", "label": "Plant", "enabled": True, "step": 1},
     {"key": "watcher", "label": "Watcher", "enabled": False, "step": 8},
-    {"key": "investigate", "label": "Investigate", "enabled": False, "step": 4},
+    {"key": "investigate", "label": "Investigate", "enabled": True, "step": 4},
     {"key": "scenarios", "label": "Scenario builder", "enabled": False, "step": 2},
     {"key": "evaluation", "label": "Evaluation", "enabled": False, "step": 3},
 ]
@@ -245,6 +246,139 @@ def api_plant(
                 "completeness": round(float(row.data_completeness), 3),
             }
             for period, row in pr_frame.tail(400).iterrows()
+        ],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Investigate tab — the tape
+# ---------------------------------------------------------------------------
+def _trace_files() -> list[Path]:
+    root = Settings.from_env().traces_dir
+    if not root.exists():
+        return []
+    return sorted(
+        root.rglob("INV-*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True
+    )
+
+
+@app.get("/api/investigations")
+def api_investigations() -> dict[str, Any]:
+    """Every trace on disk, newest first.
+
+    The dashboard is read-only with respect to the loop: it never starts an
+    investigation, it replays ones `watcher.py` or the evaluation harness
+    already wrote.
+    """
+    out: list[dict[str, Any]] = []
+    for path in _trace_files()[:200]:
+        try:
+            steps = list(read_trace(path))
+        except Exception:
+            continue
+        if not steps:
+            continue
+        plan_step = next((s for s in steps if s.kind == "plan"), None)
+        answer = next((s for s in reversed(steps) if s.kind == "answer"), None)
+        args = answer.args or {} if answer else {}
+        out.append(
+            {
+                "id": path.stem,
+                "question": (plan_step.args or {}).get("question")
+                if plan_step
+                else None,
+                "title": args.get("title"),
+                "settled": bool(args.get("settled")),
+                "cause": args.get("cause"),
+                "category": args.get("category"),
+                "measurements": sum(1 for s in steps if s.kind in ("tool", "adaptive")),
+                "unplanned": sum(1 for s in steps if s.kind == "adaptive"),
+                "cost_usd": round(sum(s.cost_usd for s in steps), 4),
+                "steps": len(steps),
+                "at": steps[-1].timestamp.isoformat() if steps[-1].timestamp else None,
+            }
+        )
+    return {
+        "investigations": out,
+        # Traces are output, not source, and they are gitignored. An empty tab
+        # on a fresh clone is expected, so say why rather than showing nothing.
+        "traces_dir": str(Settings.from_env().traces_dir),
+        "api_key_present": bool(Settings.from_env().anthropic_api_key),
+    }
+
+
+# Keys whose *names* are internal vocabulary. The trace keeps the precise term
+# — `src/` may (CLAUDE.md) — and the translation happens here, at the boundary,
+# because that is the only place that knows something is about to be rendered.
+_INTERNAL_ARG_KEYS = frozenset({"hypotheses", "still_standing", "unchecked_lookalikes"})
+
+
+def _ui_args(args: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Strip internal-vocabulary keys before a step's args reach the browser.
+
+    The ledger those keys hold is already served as `possible_causes`, so
+    nothing is lost — only the word.
+    """
+    if not args:
+        return args
+    return {k: v for k, v in args.items() if k not in _INTERNAL_ARG_KEYS}
+
+
+@app.get("/api/investigation/{investigation_id}")
+def api_investigation(investigation_id: str) -> dict[str, Any]:
+    """One investigation's tape, plus the counters computed from it."""
+    if "/" in investigation_id or ".." in investigation_id:
+        raise HTTPException(400, "bad investigation id")
+    match = next((p for p in _trace_files() if p.stem == investigation_id), None)
+    if match is None:
+        raise HTTPException(404, f"no trace for {investigation_id}")
+
+    steps = list(read_trace(match))
+    plan_step = next((s for s in steps if s.kind == "plan"), None)
+    answer = next((s for s in reversed(steps) if s.kind == "answer"), None)
+    excluded = {h for s in steps for h in s.excludes}
+
+    # The possible-causes ledger comes off the tape, not from a recomputation.
+    # The last plan wins: a replan after review supersedes the opening one.
+    #
+    # The field is named `possible_causes`, not `hypotheses`, because it is
+    # rendered directly and the interface carries no jargon (CLAUDE.md). The
+    # rename happens here rather than in the template so the banned word never
+    # reaches a file the browser loads.
+    latest_plan = next((s for s in reversed(steps) if s.kind == "plan"), plan_step)
+    possible_causes = [
+        {**h, "status": "excluded" if h.get("id") in excluded else h.get("status")}
+        for h in ((latest_plan.args or {}).get("hypotheses", []) if latest_plan else [])
+    ]
+
+    return {
+        "id": investigation_id,
+        "question": (plan_step.args or {}).get("question") if plan_step else None,
+        "possible_causes": possible_causes,
+        "answer": answer.args if answer else None,
+        "counters": {
+            "measurements": sum(1 for s in steps if s.kind in ("tool", "adaptive")),
+            "unplanned": sum(1 for s in steps if s.kind == "adaptive"),
+            "review_cycles": sum(1 for s in steps if s.kind == "critic"),
+            "cost_usd": round(sum(s.cost_usd for s in steps), 4),
+            "tokens": sum(s.tokens for s in steps),
+            "seconds": round(sum(s.latency_ms for s in steps) / 1000.0, 1),
+        },
+        "steps": [
+            {
+                "index": s.step_index,
+                "kind": s.kind,
+                "node": s.node,
+                "result": s.result,
+                "was_planned": s.was_planned,
+                "reason_for_choosing": s.reason_for_choosing,
+                "excludes": s.excludes,
+                "args": _ui_args(s.args),
+                "cost_usd": round(s.cost_usd, 4),
+                "tokens": s.tokens,
+                "at": s.timestamp.isoformat() if s.timestamp else None,
+            }
+            for s in steps
         ],
     }
 

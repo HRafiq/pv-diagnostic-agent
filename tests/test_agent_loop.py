@@ -1,0 +1,888 @@
+"""The investigation loop, driven end to end without a network call.
+
+Everything asserted here is a property of the *orchestration*, not of any
+model: which node runs when, what gets written to the tape, how `was_planned`
+is decided, what happens when a tool fails or a synthesis is unusable, and
+whether the honesty rules survive a model that tries to break them.
+
+That distinction is the reason `ScriptedClient` exists. If these behaviours
+could only be checked by calling an API, they would be checked rarely,
+non-deterministically, and never in CI — and the loop is exactly the part where
+a regression is invisible until an evaluation run produces quietly wrong
+numbers.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+import pandas as pd
+import pytest
+from pydantic import ValidationError
+
+from src.agent.llm import LLMResponse, ScriptedClient
+from src.agent.loop_plain import investigate, recheck_grounding
+from src.agent.nodes import execute, ledger_of, plan, route, synthesize
+from src.agent.nodes.planner import PLAN_SCHEMA
+from src.agent.nodes.prompts import plant_brief
+from src.agent.nodes.router import ROUTE_SCHEMA, RouterDecision
+from src.agent.nodes.synthesizer import SYNTHESIS_SCHEMA
+from src.agent.state import AgentState, CriticVerdict, Hypothesis
+from src.clock import FrozenClock
+from src.tools import ToolContext, tool_names
+from src.trace.writer import read_trace
+from tests.conftest import context_for, synthetic_frame
+
+
+# ---------------------------------------------------------------------------
+# Scripted payload builders
+# ---------------------------------------------------------------------------
+def a_plan(
+    tools: list[str],
+    hypotheses: list[tuple[str, str]] | None = None,
+) -> dict[str, Any]:
+    pairs = hypotheses or [("H1", "string_outage"), ("H2", "weather")]
+    return {
+        "scope": "INV-01 / whole plant",
+        "opening_reasoning": "Separate a real loss from the weather first.",
+        "hypotheses": [
+            {
+                "id": hid,
+                "cause": cause,
+                "consequence_if_true": f"acting on {cause} costs a site visit",
+                "discriminating_measurements": tools[:1],
+            }
+            for hid, cause in pairs
+        ],
+        "planned_tools": tools,
+    }
+
+
+def a_call(
+    tool: str, args: dict[str, Any] | None = None, reason: str = "", **kw: Any
+) -> dict[str, Any]:
+    return {
+        "action": "call_tool",
+        "tool": tool,
+        "args": args or {},
+        "reason_for_choosing": reason or f"{tool} separates the open candidates",
+        "excludes": kw.get("excludes", []),
+    }
+
+
+def a_stop(reason: str = "one cause stands") -> dict[str, Any]:
+    return {
+        "action": "stop",
+        "tool": "",
+        "args": {},
+        "reason_for_choosing": reason,
+        "excludes": [],
+    }
+
+
+def a_settled_answer(**overrides: Any) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "settled": True,
+        "category": "fault",
+        "cause": "string_outage",
+        "confidence": 0.85,
+        "candidate_causes": [],
+        "resolving_measurement": "",
+        "title": "One string is carrying no current",
+        "summary": "One of the seven strings is producing nothing.",
+        "answer": "One string's share of array current is zero while the others hold.",
+        "recommended_action": "Send someone to check the combiner fuse.",
+        "energy_at_stake_kwh": 0.0,
+        "evidence": [],
+    }
+    payload.update(overrides)
+    return payload
+
+
+def an_unsettled_answer(**overrides: Any) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "settled": False,
+        "category": "",
+        "cause": "",
+        "confidence": 0.0,
+        "candidate_causes": [
+            {"cause": "clipping", "consequence_if_true": "nothing to do"},
+            {"cause": "curtailment", "consequence_if_true": "bill the grid operator"},
+        ],
+        "resolving_measurement": "check the grid operator's dispatch log",
+        "title": "Output is being held at a ceiling",
+        "summary": "Power stops at a flat level every clear midday.",
+        "answer": "A flat ceiling is present. Two causes produce it and nothing "
+        "measured here separates them.",
+        "recommended_action": "Check the dispatch log before sending anyone.",
+        "energy_at_stake_kwh": 0.0,
+        "evidence": [],
+    }
+    payload.update(overrides)
+    return payload
+
+
+def run(
+    plans: list[dict[str, Any]],
+    routes: list[dict[str, Any]],
+    answers: list[dict[str, Any]],
+    ctx: ToolContext,
+    clock: FrozenClock,
+    **kwargs: Any,
+) -> Any:
+    client = ScriptedClient(
+        replies={
+            "planner": list(plans),
+            "router": list(routes),
+            "synthesizer": list(answers),
+        }
+    )
+    return investigate(
+        "Output is down on this array. What happened?",
+        ctx,
+        client,
+        clock,
+        investigation_id=kwargs.pop("investigation_id", "INV-TEST-001"),
+        **kwargs,
+    )
+
+
+# ===========================================================================
+# The happy path
+# ===========================================================================
+def test_a_full_pass_plans_measures_and_answers(
+    ctx: ToolContext, clock: FrozenClock
+) -> None:
+    out = run(
+        [a_plan(["compute_temp_corrected_pr", "per_mppt_current_balance"])],
+        [
+            a_call("compute_temp_corrected_pr"),
+            a_call("per_mppt_current_balance"),
+            a_stop(),
+        ],
+        [a_settled_answer()],
+        ctx,
+        clock,
+    )
+
+    assert [s.kind for s in out.steps] == ["plan", "tool", "tool", "answer"]
+    assert out.tools_called == [
+        "compute_temp_corrected_pr",
+        "per_mppt_current_balance",
+    ]
+    assert len(out.results) == 2
+    assert not out.errors
+    assert out.finding is not None
+    assert out.finding.settled and out.finding.cause == "string_outage"
+
+
+def test_the_window_is_pinned_so_the_agent_cannot_silently_measure_everything(
+    clock: FrozenClock,
+) -> None:
+    """A tool defaults to the whole frame. Asked about a fortnight, an
+    unpinned run would quietly answer about two years."""
+    frame = synthetic_frame(days=40)
+    ctx = context_for(frame)
+    out = run(
+        [a_plan(["compute_temp_corrected_pr"])],
+        [a_call("compute_temp_corrected_pr"), a_stop()],
+        [a_settled_answer()],
+        ctx,
+        clock,
+        start="2017-04-01",
+        end="2017-04-07",
+    )
+    step = next(s for s in out.steps if s.kind == "tool")
+    assert step.args is not None
+    assert str(step.args["start"]).startswith("2017-04-01")
+    # Seven days at 15 minutes, daylight only.
+    assert out.results[0].samples_used < 7 * 96
+
+
+def test_a_router_narrowing_the_window_overrides_the_default(
+    ctx: ToolContext, clock: FrozenClock
+) -> None:
+    out = run(
+        [a_plan(["per_mppt_current_balance"])],
+        [
+            a_call(
+                "per_mppt_current_balance",
+                {"hour_start": 7, "hour_end": 10},
+                reason="the loss looked confined to the morning",
+            ),
+            a_stop(),
+        ],
+        [a_settled_answer()],
+        ctx,
+        clock,
+    )
+    assert out.results[0].values["intervals_scored"] < 200
+
+
+# ===========================================================================
+# was_planned — the agency signal
+# ===========================================================================
+def test_a_tool_in_the_plan_is_planned(ctx: ToolContext, clock: FrozenClock) -> None:
+    out = run(
+        [a_plan(["compute_temp_corrected_pr"])],
+        [a_call("compute_temp_corrected_pr"), a_stop()],
+        [a_settled_answer()],
+        ctx,
+        clock,
+    )
+    step = next(s for s in out.steps if s.node == "compute_temp_corrected_pr")
+    assert step.kind == "tool" and step.was_planned
+    assert out.unplanned_tools == []
+
+
+def test_a_tool_outside_the_plan_is_recorded_as_unplanned(
+    ctx: ToolContext, clock: FrozenClock
+) -> None:
+    out = run(
+        [a_plan(["compute_temp_corrected_pr"])],
+        [
+            a_call("compute_temp_corrected_pr"),
+            a_call(
+                "check_clearsky_consistency",
+                reason="performance ratio rose, which a real loss cannot do",
+            ),
+            a_stop(),
+        ],
+        [a_settled_answer()],
+        ctx,
+        clock,
+    )
+    unplanned = [s for s in out.steps if s.kind == "adaptive"]
+    assert [s.node for s in unplanned] == ["check_clearsky_consistency"]
+    assert "a real loss cannot do" in (unplanned[0].reason_for_choosing or "")
+    assert out.unplanned_tools == ["check_clearsky_consistency"]
+
+
+def test_rerunning_a_planned_tool_counts_as_adaptive(
+    ctx: ToolContext, clock: FrozenClock
+) -> None:
+    """The plan spent that tool once. Going back to it over a narrowed window
+    is the plan being extended by evidence, not followed."""
+    out = run(
+        [a_plan(["per_mppt_current_balance"])],
+        [
+            a_call("per_mppt_current_balance"),
+            a_call(
+                "per_mppt_current_balance",
+                {"hour_start": 7, "hour_end": 10},
+                reason="the whole-day average may be hiding a morning-only loss",
+            ),
+            a_stop(),
+        ],
+        [a_settled_answer()],
+        ctx,
+        clock,
+    )
+    kinds = [s.kind for s in out.steps if s.node == "per_mppt_current_balance"]
+    assert kinds == ["tool", "adaptive"]
+
+
+def test_the_router_cannot_self_report_was_planned(
+    ctx: ToolContext, clock: FrozenClock
+) -> None:
+    """A metric the subject reports about itself is not a measurement.
+
+    Even if a model volunteers `was_planned: true` for a tool that was never in
+    the plan, the executor derives the flag from the plan and ignores the claim.
+    """
+    assert "was_planned" not in ROUTE_SCHEMA["properties"]
+    lying = a_call("check_ac_ceiling", reason="following the evidence")
+    lying["was_planned"] = True
+
+    out = run(
+        [a_plan(["compute_temp_corrected_pr"])],
+        [lying, a_stop()],
+        [a_settled_answer()],
+        ctx,
+        clock,
+    )
+    assert out.steps[1].kind == "adaptive"
+    assert out.steps[1].was_planned is False
+
+
+def test_an_unplanned_step_with_no_reason_says_so_rather_than_inventing_one(
+    ctx: ToolContext, clock: FrozenClock
+) -> None:
+    out = run(
+        [a_plan(["compute_temp_corrected_pr"])],
+        [a_call("check_ac_ceiling", reason=" "), a_stop()],
+        [a_settled_answer()],
+        ctx,
+        clock,
+    )
+    assert "without stating a reason" in (out.steps[1].reason_for_choosing or "")
+
+
+def test_the_trace_model_refuses_an_unjustified_departure() -> None:
+    from src.trace.models import TraceStep
+
+    with pytest.raises(ValidationError, match="evidence of agency"):
+        TraceStep(kind="adaptive", node="check_ac_ceiling", was_planned=False)
+
+
+# ===========================================================================
+# Failure handling
+# ===========================================================================
+def test_a_failed_tool_is_recorded_not_swallowed(
+    ctx: ToolContext, clock: FrozenClock
+) -> None:
+    """A measurement that could not be taken must reach the synthesiser.
+
+    Dropping it would let the answer imply a channel was checked when it was
+    not — an absence of evidence presented as evidence of absence.
+    """
+    bare = ctx.frame.drop(
+        columns=[c for c in ctx.frame.columns if c.startswith("string_")]
+    )
+    out = run(
+        [a_plan(["per_mppt_current_balance", "compute_temp_corrected_pr"])],
+        [
+            a_call("per_mppt_current_balance"),
+            a_call("compute_temp_corrected_pr"),
+            a_stop(),
+        ],
+        [a_settled_answer()],
+        context_for(bare),
+        clock,
+    )
+    assert len(out.errors) == 1
+    assert "fewer than two" in out.errors[0]
+    assert len(out.results) == 1
+    failed = next(s for s in out.steps if s.node == "per_mppt_current_balance")
+    assert "could not take this measurement" in (failed.result or "")
+
+
+def test_a_router_naming_a_tool_that_does_not_exist_stops_the_cycle(
+    ctx: ToolContext, clock: FrozenClock
+) -> None:
+    out = run(
+        [a_plan(["compute_temp_corrected_pr"])],
+        [a_call("read_the_maintenance_log")],
+        [a_settled_answer()],
+        ctx,
+        clock,
+    )
+    assert out.tools_called == []
+    assert [s.kind for s in out.steps] == ["plan", "answer"]
+
+
+def test_the_per_cycle_cap_stops_a_router_that_never_stops(
+    ctx: ToolContext, clock: FrozenClock
+) -> None:
+    client = ScriptedClient(
+        replies={
+            "planner": [a_plan(["compute_temp_corrected_pr"])],
+            "synthesizer": [a_settled_answer()],
+        },
+        default=a_call("compute_temp_corrected_pr"),
+    )
+    out = investigate(
+        "why is output down?",
+        ctx,
+        client,
+        clock,
+        investigation_id="INV-CAP",
+        max_tools_per_cycle=3,
+    )
+    assert len(out.tools_called) == 3
+    assert "per-cycle measurement cap" in out.stopped_because
+
+
+# ===========================================================================
+# Honesty of the output
+# ===========================================================================
+def test_an_unsettled_answer_never_shows_a_cause_or_a_confidence(
+    ctx: ToolContext, clock: FrozenClock
+) -> None:
+    """The bug that sends a wash crew to a clean array.
+
+    Even when the model returns a cause and a confidence alongside
+    `settled: false`, neither may reach the finding.
+    """
+    sneaky = an_unsettled_answer(
+        cause="soiling", confidence=0.78, category="recoverable"
+    )
+    out = run(
+        [a_plan(["check_ac_ceiling"])],
+        [a_call("check_ac_ceiling"), a_stop()],
+        [sneaky],
+        ctx,
+        clock,
+    )
+    assert out.synthesis is not None
+    assert out.synthesis.cause is None
+    assert out.synthesis.confidence is None
+    assert out.finding is not None
+    assert out.finding.cause is None
+    assert out.finding.confidence is None
+    assert out.finding.energy_verified is False
+    assert len(out.finding.candidate_causes) == 2
+    assert out.finding.resolving_measurement
+
+
+def test_an_unsettled_answer_with_one_survivor_is_refused_not_padded(
+    ctx: ToolContext, clock: FrozenClock
+) -> None:
+    """Stripping a cause that must not be shown is safe. Inventing a second
+    candidate to satisfy a validator would be the same dishonesty inverted."""
+    thin = an_unsettled_answer(
+        candidate_causes=[{"cause": "clipping", "consequence_if_true": "nothing"}]
+    )
+    out = run(
+        [a_plan(["check_ac_ceiling"])],
+        [a_call("check_ac_ceiling"), a_stop()],
+        [thin],
+        ctx,
+        clock,
+    )
+    assert out.finding is None
+    assert out.synthesis is not None
+    assert "fewer than two" in (out.synthesis.build_error or "")
+    assert any("could not be filed" in e for e in out.errors)
+
+
+def test_an_unsettled_answer_with_no_next_test_is_refused(
+    ctx: ToolContext, clock: FrozenClock
+) -> None:
+    out = run(
+        [a_plan(["check_ac_ceiling"])],
+        [a_call("check_ac_ceiling"), a_stop()],
+        [an_unsettled_answer(resolving_measurement="")],
+        ctx,
+        clock,
+    )
+    assert out.finding is None
+    assert "would resolve it" in (out.synthesis.build_error or "")  # type: ignore[union-attr]
+
+
+def test_a_settled_answer_drops_leftover_candidates(
+    ctx: ToolContext, clock: FrozenClock
+) -> None:
+    hedging = a_settled_answer(
+        candidate_causes=[
+            {"cause": "soiling", "consequence_if_true": "wash it"},
+            {"cause": "weather", "consequence_if_true": "nothing"},
+        ],
+        resolving_measurement="look again next week",
+    )
+    out = run(
+        [a_plan(["per_mppt_current_balance"])],
+        [a_call("per_mppt_current_balance"), a_stop()],
+        [hedging],
+        ctx,
+        clock,
+    )
+    assert out.finding is not None
+    assert out.finding.candidate_causes == []
+    assert out.finding.resolving_measurement is None
+
+
+def test_a_settled_answer_with_no_confidence_is_refused(
+    ctx: ToolContext, clock: FrozenClock
+) -> None:
+    out = run(
+        [a_plan(["per_mppt_current_balance"])],
+        [a_call("per_mppt_current_balance"), a_stop()],
+        [a_settled_answer(confidence=None)],
+        ctx,
+        clock,
+    )
+    assert out.finding is None
+    assert "no confidence" in (out.synthesis.build_error or "")  # type: ignore[union-attr]
+
+
+# ===========================================================================
+# Numeric grounding
+# ===========================================================================
+def test_a_fabricated_figure_is_caught(ctx: ToolContext, clock: FrozenClock) -> None:
+    out = run(
+        [a_plan(["compute_temp_corrected_pr"])],
+        [a_call("compute_temp_corrected_pr"), a_stop()],
+        [
+            a_settled_answer(
+                answer="The performance ratio is 0.4213, well below normal."
+            )
+        ],
+        ctx,
+        clock,
+    )
+    assert out.ungrounded_numbers == ["0.4213"]
+    assert recheck_grounding(out) == ["0.4213"]
+
+
+def test_a_quoted_figure_passes(ctx: ToolContext, clock: FrozenClock) -> None:
+    client = ScriptedClient(
+        replies={
+            "planner": [a_plan(["compute_temp_corrected_pr"])],
+            "router": [a_call("compute_temp_corrected_pr"), a_stop()],
+            "synthesizer": [a_settled_answer()],
+        }
+    )
+    first = investigate("q", ctx, client, clock, investigation_id="INV-A")
+    measured = first.results[0].values["pr_temperature_corrected"]
+
+    out = run(
+        [a_plan(["compute_temp_corrected_pr"])],
+        [a_call("compute_temp_corrected_pr"), a_stop()],
+        [
+            a_settled_answer(
+                answer=f"Temperature-corrected performance ratio is {measured:.3f}."
+            )
+        ],
+        ctx,
+        clock,
+    )
+    assert out.ungrounded_numbers == []
+
+
+def test_the_ledger_namespaces_by_tool(ctx: ToolContext, clock: FrozenClock) -> None:
+    out = run(
+        [a_plan(["compute_temp_corrected_pr", "check_ac_ceiling"])],
+        [a_call("compute_temp_corrected_pr"), a_call("check_ac_ceiling"), a_stop()],
+        [a_settled_answer()],
+        ctx,
+        clock,
+    )
+    ledger = ledger_of(out.results)
+    assert "compute_temp_corrected_pr.pr" in ledger
+    assert "check_ac_ceiling.peak_ac_kw" in ledger
+
+
+# ===========================================================================
+# The critic seam and the cycle cap
+# ===========================================================================
+def _verdict(kind: str, **kw: Any) -> CriticVerdict:
+    return CriticVerdict(
+        hypotheses_considered=["H1", "H2"],
+        hypotheses_still_standing=kw.pop("standing", ["H1", "H2"]),
+        lookalikes_checked=list(kw.pop("checked", [])),
+        verdict=kind,  # type: ignore[arg-type]
+        **kw,
+    )
+
+
+def test_without_a_critic_the_loop_is_a_single_pass(
+    ctx: ToolContext, clock: FrozenClock
+) -> None:
+    out = run(
+        [a_plan(["compute_temp_corrected_pr"])],
+        [a_call("compute_temp_corrected_pr"), a_stop()],
+        [a_settled_answer()],
+        ctx,
+        clock,
+    )
+    assert out.state.cycle == 0
+    assert not any(s.kind == "critic" for s in out.steps)
+
+
+def test_send_back_replans_with_the_instruction_in_hand(
+    ctx: ToolContext, clock: FrozenClock
+) -> None:
+    seen: list[str] = []
+
+    def critic(state: AgentState, results: Any, synthesis: Any) -> CriticVerdict:
+        if not state.verdicts:
+            return _verdict(
+                "send_back",
+                revision_request="exclude curtailment with check_ac_ceiling",
+            )
+        return _verdict("accept", standing=[], checked=list(_ALL_LOOKALIKES))
+
+    client = ScriptedClient(
+        replies={
+            "planner": [
+                a_plan(["compute_temp_corrected_pr"]),
+                a_plan(["check_ac_ceiling"]),
+            ],
+            "router": [
+                a_call("compute_temp_corrected_pr"),
+                a_stop(),
+                a_call("check_ac_ceiling"),
+                a_stop(),
+            ],
+            "synthesizer": [a_settled_answer(), a_settled_answer()],
+        }
+    )
+    out = investigate("q", ctx, client, clock, investigation_id="INV-SB", critic=critic)
+    seen = [user for node, _, user in client.calls if node == "planner"]
+
+    assert out.state.cycle == 1
+    assert len(out.state.verdicts) == 2
+    assert "exclude curtailment" in seen[1]
+    assert [s.kind for s in out.steps].count("critic") == 2
+    # The revised plan extends the original rather than replacing it, so the
+    # unplanned rate keeps measuring router adaptation and not replanning.
+    assert out.state.planned_tools == ["compute_temp_corrected_pr", "check_ac_ceiling"]
+    assert out.unplanned_tools == []
+
+
+def test_the_cycle_cap_stops_a_critic_that_never_accepts(
+    ctx: ToolContext, clock: FrozenClock
+) -> None:
+    def never_happy(state: AgentState, results: Any, synthesis: Any) -> CriticVerdict:
+        return _verdict(
+            "send_back", revision_request="try harder with check_ac_ceiling"
+        )
+
+    client = ScriptedClient(replies={})
+    client.replies = {
+        "planner": [a_plan(["compute_temp_corrected_pr"])] * 6,
+        "router": [a_call("compute_temp_corrected_pr"), a_stop()] * 6,
+        "synthesizer": [a_settled_answer()] * 6,
+    }
+    out = investigate(
+        "q",
+        ctx,
+        client,
+        clock,
+        investigation_id="INV-CYC",
+        max_cycles=3,
+        critic=never_happy,
+    )
+    assert out.state.cycle == 3
+    assert len(out.state.verdicts) == 3
+    assert "3-cycle review cap" in out.stopped_because
+
+
+def test_not_enough_evidence_ends_the_loop_as_a_success(
+    ctx: ToolContext, clock: FrozenClock
+) -> None:
+    """Abstention is an outcome, not a failure path. It must not burn cycles."""
+
+    def undecided(state: AgentState, results: Any, synthesis: Any) -> CriticVerdict:
+        return _verdict("not_enough_evidence")
+
+    client = ScriptedClient(
+        replies={
+            "planner": [a_plan(["check_ac_ceiling"])],
+            "router": [a_call("check_ac_ceiling"), a_stop()],
+            "synthesizer": [an_unsettled_answer()],
+        }
+    )
+    out = investigate(
+        "q", ctx, client, clock, investigation_id="INV-NEE", critic=undecided
+    )
+    assert out.state.cycle == 0
+    assert out.finding is not None and out.finding.settled is False
+
+
+_ALL_LOOKALIKES = (
+    "weather",
+    "seasonal_temperature_derating",
+    "clipping",
+    "curtailment",
+    "irradiance_sensor_drift",
+    "snow_or_dust_event",
+    "telemetry_gaps",
+)
+
+
+# ===========================================================================
+# The trace file
+# ===========================================================================
+def test_the_tape_is_written_and_reloadable(
+    ctx: ToolContext, clock: FrozenClock, tmp_path: Any
+) -> None:
+    out = run(
+        [a_plan(["compute_temp_corrected_pr"])],
+        [a_call("compute_temp_corrected_pr"), a_stop()],
+        [a_settled_answer()],
+        ctx,
+        clock,
+        trace_root=tmp_path,
+    )
+    assert out.trace_path is not None and out.trace_path.exists()
+    replayed = list(read_trace(out.trace_path))
+    assert [s.kind for s in replayed] == ["plan", "tool", "answer"]
+    assert [s.step_index for s in replayed] == [0, 1, 2]
+    # Simulated time from the injected clock, never wall clock.
+    assert all(s.timestamp == clock.now() for s in replayed)
+
+
+def test_the_cost_column_sums_to_the_investigation_total(
+    ctx: ToolContext, clock: FrozenClock
+) -> None:
+    """Every LLM call has to land on exactly one tape entry.
+
+    The router call that produced a measurement is billed to that measurement;
+    the router call that stopped the cycle is billed to the answer. If either
+    were dropped, the cost panel would understate what a run cost.
+    """
+    priced = ScriptedClient(
+        replies={
+            "planner": [a_plan(["compute_temp_corrected_pr"])],
+            "router": [a_call("compute_temp_corrected_pr"), a_stop()],
+            "synthesizer": [a_settled_answer()],
+        }
+    )
+    original = priced.complete
+
+    def priced_complete(
+        node: str, system: str, user: str, schema: Any = None
+    ) -> LLMResponse:
+        response = original(node, system, user, schema)
+        response.cost_usd = 0.01
+        response.input_tokens = 100
+        response.output_tokens = 50
+        return response
+
+    priced.complete = priced_complete  # type: ignore[method-assign]
+    out = investigate("q", ctx, priced, clock, investigation_id="INV-COST")
+
+    assert out.llm_calls == 4
+    assert out.cost_usd == pytest.approx(0.04)
+    assert sum(s.cost_usd for s in out.steps) == pytest.approx(out.cost_usd)
+    assert sum(s.tokens for s in out.steps) == 4 * 150
+
+
+# ===========================================================================
+# Node-level behaviour
+# ===========================================================================
+def test_the_planner_drops_tool_names_that_do_not_exist(
+    ctx: ToolContext,
+) -> None:
+    """A plan naming a tool that does not exist would inflate the unplanned
+    rate: every real call would score as a departure from it."""
+    payload = a_plan(["compute_temp_corrected_pr"])
+    payload["planned_tools"] = ["compute_temp_corrected_pr", "read_the_work_orders"]
+    client = ScriptedClient(replies={"planner": [payload]})
+    state = AgentState(investigation_id="X", question="q", scope="plant")
+    outcome = plan(client, state, "brief")
+    assert outcome.planned_tools == ["compute_temp_corrected_pr"]
+
+
+def test_the_plan_schema_demands_more_than_one_candidate() -> None:
+    """A planner that emits one hypothesis has skipped the differential."""
+    assert PLAN_SCHEMA["properties"]["hypotheses"]["minItems"] == 2
+
+
+def test_every_schema_that_drives_control_flow_is_closed() -> None:
+    for schema in (PLAN_SCHEMA, ROUTE_SCHEMA, SYNTHESIS_SCHEMA):
+        assert schema["additionalProperties"] is False
+        assert schema["required"]
+
+
+def test_the_router_stops_when_it_returns_prose_instead_of_a_decision(
+    ctx: ToolContext,
+) -> None:
+    client = ScriptedClient(replies={"router": ["I think we should keep looking."]})
+    state = AgentState(investigation_id="X", question="q", scope="plant")
+    decision = route(client, state, "brief", [], [], calls_remaining=3)
+    assert decision.stops
+
+
+def test_the_executor_marks_exclusions_on_the_state(ctx: ToolContext) -> None:
+    state = AgentState(
+        investigation_id="X",
+        question="q",
+        scope="plant",
+        hypotheses=[
+            Hypothesis(id="H1", cause="weather", consequence_if_true="nothing"),
+            Hypothesis(id="H2", cause="string_outage", consequence_if_true="visit"),
+        ],
+        planned_tools=["compute_temp_corrected_pr"],
+    )
+    decision = RouterDecision(
+        action="call_tool",
+        tool="compute_temp_corrected_pr",
+        reason="baseline",
+        excludes=["H1"],
+    )
+    execution = execute(ctx, state, decision)
+    assert execution.ok
+    assert execution.step.excludes == ["H1"]
+
+
+def test_the_brief_states_no_performance_figure(ctx: ToolContext) -> None:
+    """If the brief handed over a performance ratio, the planner would anchor
+    on it and the first measurement would be decoration."""
+    brief = plant_brief(ctx, "why is output down?", ctx.frame)
+    assert "performance ratio" not in brief.lower()
+    assert "270" not in brief  # no headline numbers beyond plant specification
+    assert "LOOK-ALIKES" in brief
+
+
+def test_the_brief_names_every_lookalike(ctx: ToolContext) -> None:
+    brief = plant_brief(ctx, "q", ctx.frame)
+    for item in _ALL_LOOKALIKES:
+        assert item in brief
+
+
+def test_prompts_carry_no_thresholds() -> None:
+    """A threshold in a prompt is a rule engine written in English."""
+    from src.agent.nodes.prompts import (
+        PLANNER_SYSTEM,
+        ROUTER_SYSTEM,
+        SYNTHESIZER_SYSTEM,
+    )
+
+    for prompt in (PLANNER_SYSTEM, ROUTER_SYSTEM, SYNTHESIZER_SYSTEM):
+        lowered = prompt.lower()
+        assert "greater than" not in lowered
+        assert "exceeds" not in lowered
+        assert "%" not in lowered.replace("0.4% of its power", "")
+
+
+def test_the_synthesizer_is_told_not_to_do_arithmetic() -> None:
+    from src.agent.nodes.prompts import SYNTHESIZER_SYSTEM
+
+    assert "must not estimate, extrapolate, or compute" in SYNTHESIZER_SYSTEM
+
+
+def test_synthesize_reports_grounding_without_being_asked(
+    ctx: ToolContext,
+) -> None:
+    client = ScriptedClient(
+        replies={"synthesizer": [a_settled_answer(answer="PR was 0.9999.")]}
+    )
+    state = AgentState(investigation_id="X", question="q", scope="plant")
+    synthesis = synthesize(client, state, "brief", [], [])
+    assert synthesis.grounding.ungrounded == ["0.9999"]
+    assert synthesis.grounding.as_claims()[0].startswith("the figure 0.9999")
+
+
+def test_scripted_client_fails_loudly_when_a_reply_is_missing(
+    ctx: ToolContext, clock: FrozenClock
+) -> None:
+    """A silent stub would produce a run that looks complete and means nothing."""
+    client = ScriptedClient(replies={"planner": [a_plan(["check_ac_ceiling"])]})
+    with pytest.raises(AssertionError, match="no reply queued for node 'router'"):
+        investigate("q", ctx, client, clock, investigation_id="INV-X")
+
+
+def test_the_tool_catalogue_reaches_the_planner(ctx: ToolContext) -> None:
+    client = ScriptedClient(replies={"planner": [a_plan(["check_ac_ceiling"])]})
+    state = AgentState(investigation_id="X", question="q", scope="plant")
+    plan(client, state, "brief")
+    _, _, user = client.calls[0]
+    for name in tool_names():
+        assert name in user
+
+
+def test_a_plan_reply_that_is_prose_yields_no_hypotheses(ctx: ToolContext) -> None:
+    client = ScriptedClient(replies={"planner": ["let's have a look at the data"]})
+    state = AgentState(investigation_id="X", question="q", scope="plant")
+    outcome = plan(client, state, "brief")
+    assert outcome.hypotheses == [] and outcome.planned_tools == []
+
+
+def test_investigation_result_json_round_trips_for_the_dashboard(
+    ctx: ToolContext, clock: FrozenClock, tmp_path: Any
+) -> None:
+    out = run(
+        [a_plan(["compute_temp_corrected_pr"])],
+        [a_call("compute_temp_corrected_pr"), a_stop()],
+        [a_settled_answer()],
+        ctx,
+        clock,
+        trace_root=tmp_path,
+    )
+    payload = json.loads(pd.Series([s.model_dump_json() for s in out.steps]).iloc[0])
+    assert payload["kind"] == "plan"
+    assert payload["was_planned"] is True

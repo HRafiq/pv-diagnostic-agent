@@ -21,9 +21,10 @@ causes, says so and names the cheap test that would.
 The output is one of three instructions: **send someone, schedule something, or
 do nothing.** The third is the one nobody sells and often the most valuable.
 
-> **Status: steps 0–3 of 13 complete.** Real data ingested, physics validated,
-> fault injector and evaluation harness running with a rules baseline scored.
-> The agent itself arrives at step 4. See *Build progress* below.
+> **Status: steps 0–4 of 13 complete.** Real data ingested, physics validated,
+> fault injector and evaluation harness running with a rules baseline scored,
+> and the agent loop taking measurements end to end with its reasoning on
+> screen. See *Build progress* below.
 
 ---
 
@@ -62,6 +63,12 @@ and a confidence number when the investigation could not separate two causes
 cannot be constructed. That is the exact bug that dispatches a wash crew to a
 clean array.
 
+**Every number is traceable to a measurement.** Each tool returns a provenance
+ledger of everything it measured, and the agent's prose is checked against the
+union of them. A figure that is not in a ledger is reported as ungrounded —
+including one the agent derived by arithmetic, because arithmetic belongs in a
+tool where it is deterministic and testable, not in a sentence.
+
 ---
 
 ## Getting started
@@ -73,14 +80,16 @@ cp .env.example .env          # ANTHROPIC_API_KEY needed only for agent nodes
 ```
 
 ```bash
-pytest                                    # 191 tests
+pytest                                    # 340 tests
 ruff check . && mypy src eval simulator   # lint + types
 
 python watcher.py status                  # clock, models, config
 python watcher.py run --until 2019-06-30 --step 1D
 
 python -m src.data.cli ingest --system 4902 --years 2016 2017
-python -m eval.runner build && python -m eval.runner run --engine rules
+python -m eval.runner build
+python -m eval.runner run --engine rules            # no API key needed
+python -m eval.runner run --engine agent --split tuning
 
 uvicorn dashboard.app:app --reload        # http://127.0.0.1:8000
 ```
@@ -128,8 +137,8 @@ the dashboard reads.
 | 1 | PVDAQ ingestion + expectation model. Dashboard Tab 1 live | **done** |
 | 2 | Physics-level fault injector, 7 injectors, 20 golden cases | **done** |
 | 3 | Evaluation harness — runner, metrics, agency metrics, rules baseline | **done** |
-| 4 | Vertical slice: plain-Python loop, 10 golden questions end to end, Tab 3 | next |
-| 5 | Full atomic tool set + domain-knowledge YAML. Golden set to 60-80 | |
+| 4 | Vertical slice: plain-Python loop, 9 measurement tools, Tab 3 | **done** |
+| 5 | Full atomic tool set + domain-knowledge YAML. Golden set to 60-80 | next |
 | 6 | Critic with structured verdict, iteration cap, not-enough-evidence path | |
 | 7 | Rules-engine baseline + first rules-vs-agent comparison | |
 | 8 | Watcher: sweep, findings store with lifecycle, energy ranking. Tab 2 | |
@@ -140,6 +149,33 @@ the dashboard reads.
 | 13 | README with honest results, including whatever the ablations showed | |
 
 Each step is gated: it stops for review before the next one starts.
+
+---
+
+## How an investigation runs
+
+    plan  ->  route -> measure  (repeat)  ->  write the answer  ->  review
+      ^                                                               |
+      +---------------------- send it back ---------------------------+
+
+The planner enumerates candidate causes — benign ones included, since a plan
+containing only faults has already decided the answer — and opens a line of
+enquiry. The router picks one measurement at a time and may depart from the plan
+whenever a result points elsewhere. The synthesiser writes the finding and is
+allowed no arithmetic. The reviewer arrives at step 6; until then the loop is a
+single pass.
+
+The whole loop runs against a scripted client with no network and no API key, so
+its control flow, its caps, its abstention path and the tape it writes are all
+regression-tested in CI. That matters because the loop is exactly the part where
+a fault stays invisible until an evaluation run quietly produces wrong numbers.
+
+The **Investigate** tab replays a run: the plan, each measurement with its
+result, unplanned measurements flagged with the reason the agent gave, the
+possible-causes ledger with what has been ruled out, and the answer — which
+shows a single cause and a confidence only when the investigation reached one.
+The dashboard never starts a run; `watcher.py` and the evaluation harness write
+traces and the dashboard reads them.
 
 ---
 

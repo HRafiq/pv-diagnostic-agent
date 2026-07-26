@@ -377,3 +377,168 @@ call that is a much harder claim to check.
 
 **Cost.** Losing `ModelChain`'s loss tree and its ability to swap DC models by
 name. Neither is wanted here — the coarseness is deliberate.
+
+---
+
+## 0018 — A plain Python loop before LangGraph (2026-07-26)
+
+**Decision.** The investigation loop is ~200 lines of explicit Python in
+`src/agent/loop_plain.py`. LangGraph arrives at step 12 as a *port*, and the
+gate on that port is that both produce identical golden-set outputs.
+
+**Why.** Orchestration is the thing being learned. A framework hides exactly the
+parts worth understanding: where state is mutated, what terminates the cycle,
+what happens when a node returns something unusable, and which call is billed to
+which tape entry. Writing it out first also makes the step-12 comparison a real
+one — "did the framework buy anything?" is only answerable against a version
+that already works.
+
+**Cost.** No checkpointing, no streaming, no built-in retries. All three are
+wanted eventually, and they are exactly the things the step-12 comparison should
+weigh.
+
+---
+
+## 0019 — `was_planned` is derived, never self-reported (2026-07-26)
+
+**Decision.** The router's output schema has no `was_planned` field. The
+executor computes it: a call counts as planned when the tool is in
+`planned_tools` **and** has not already run in this investigation.
+
+**Why.** The unplanned-measurement rate is the sharpest single agency metric in
+§5.5 — near zero means the planner is a sequencer and the "agent" is a pipeline
+that narrates. A metric the subject reports about itself is not a measurement. A
+model asked "was this in your plan?" is being invited to flatter itself, and a
+test confirms that a router volunteering `was_planned: true` for an off-plan
+tool is ignored.
+
+The second clause matters as much as the first. Re-running a tool the plan
+already spent — usually over a window narrowed because an earlier result pointed
+at a date — is the plan being *extended by evidence*, not followed. Counting it
+as planned would hide the exact behaviour the metric exists to detect.
+
+`reason_for_choosing` is required on every call, not only on departures. A field
+that appears only once the model has decided to go off-plan gets written to
+justify the departure rather than to explain the choice.
+
+**Alternatives.** (a) Ask the model and trust it — unmeasurable. (b) Count any
+tool outside the *opening* plan as unplanned, so a critic-driven replan inflates
+the rate — rejected: that measures replanning, not adaptation. Revised plans
+accumulate into `planned_tools`, so only router-level departures register.
+
+---
+
+## 0020 — A provenance ledger on every tool result (2026-07-26)
+
+**Decision.** `ToolResult.values` is a flat `{name: number}` map of everything
+the tool measured. The synthesiser's prose is checked against the union of those
+ledgers by `src/agent/grounding.py`, and a figure that is not in one is reported
+as ungrounded.
+
+**Why.** §5.6 targets "zero fabricated numerics", which is worth stating only if
+a violation can be detected. Two allowances are deliberate: a factor of 100
+either way (a fraction written as a percentage is unit presentation), and
+integers up to 24 (how sentences count things — "two causes", "three days",
+"09:00"). Arithmetic is *not* allowed: if the ledger holds an expected and a
+measured energy and the prose states their difference, that difference is
+flagged, because CLAUDE.md puts no LLM in arithmetic — the subtraction belongs
+in a tool where it is deterministic and testable.
+
+A parametrised test applies the same check to each tool's own summary, which
+caught three tools quoting constants (`25 °C`, a recovery threshold, a
+percentage bound) that were not in their own ledgers. The rule that fell out:
+**any constant a tool prints must be in its ledger**, or the check is scoring
+against an incomplete reference and the target is unenforceable.
+
+---
+
+## 0021 — Injector physics corrected: string channels move with the loss (2026-07-26)
+
+**Decision.** `_scale_power` gained a `scale_strings` flag. Soiling, clipping and
+curtailment now scale every per-string current and per-string DC power channel
+along with DC and AC power. Shading gained `strings_affected` and shades a
+contiguous group.
+
+**Why.** Found by pointing step 4's measurement tools at step 2's golden cases,
+which is what that exercise is for. Three defects, in increasing order of
+seriousness:
+
+1. **Soiling left every string current untouched** while cutting DC and AC
+   power. Dust sits on the glass, upstream of everything electrical, so it costs
+   every string the same fraction — and that uniformity is precisely the
+   signature that separates soiling from a string fault. The case's own stated
+   reasoning element ("affects all strings equally, so it is not a string
+   fault") was vacuous: the strings were flat because the injector forgot them.
+2. **Clipping and curtailment capped AC only**, leaving DC at full. That implies
+   an inverter running at ~58% efficiency all midday, which no inverter does. It
+   is a fingerprint of the simulator rather than of a power limit, and an agent
+   could have learned it instead of the physics — a mild form of exactly the
+   circularity CLAUDE.md exists to prevent. Both now route through one
+   `_apply_power_cap`, so neither can drift from the other and become separable
+   by a quirk of the code.
+3. **Shading one string of seven at 40% depth for three hours** removed 1.2% of
+   the window's energy — under the noise floor of every tool in the set. The
+   case was unlearnable in principle and would have scored coin flips. A shadow
+   is a physical object with an extent; it falls across a contiguous group of
+   strings. Three of seven at 55% now removes ~5%, with a clear time-of-day
+   signature and a per-string one.
+
+**Consequence.** The golden set changed, so the step-3 rules baseline was
+re-scored: **macro-F1 0.329 tuning / 0.611 held back** (was 0.329 / 0.385).
+Correct abstention stays 0.000 on both, which is structural and expected.
+
+**Note on the held-back split.** Held-back cases were inspected here to confirm
+the *physics* of the fix, not to tune anything. The remedy was applied to the
+generator — where it affects both splits symmetrically — and no split-specific
+parameter was touched. The distinction is the discipline: change the generator,
+never the split.
+
+---
+
+## 0022 — The curtailment case's ceiling raised from 150 kW to 200 kW (2026-07-26)
+
+**Decision.** The canonical unresolvable case caps export at 200 kW against a
+260 kW inverter, on windows whose clear days reach 240–255 kW.
+
+**Why.** At 150 kW the plateau sat at 58% of nameplate. No inverter clips itself
+that far below its own rating, so "clipping" was not a live explanation and the
+pair the case exists to test was quietly *resolvable* — the case was not
+measuring what it claimed. At 200 kW a limit is clearly being applied and both
+owners of that limit remain plausible: an inverter holding a configured power
+limit (common for grid-code compliance) and a grid operator capping export are
+indistinguishable on every channel this plant exposes.
+
+Surfaced by `check_ac_ceiling` reporting `plateau_as_fraction_of_ac_rating`,
+which is the kind of thing a tool should report precisely so that a case built
+on the assumption can be checked against it.
+
+---
+
+## 0023 — The soiling case runs over 45 days, not 14 (2026-07-26)
+
+**Decision.** The soiling case's window is extended by 30 days.
+
+**Why.** At a realistic temperate accumulation rate, a fortnight of soiling moves
+the temperature-corrected performance ratio by less than the weather does — the
+fitted trend on the tuning case came back at R² 0.02. Soiling is diagnosed over
+months in the field, and a case that is unanswerable in principle teaches the
+evaluation nothing. This is a fact about the domain, not a threshold to tune:
+the fix is a window long enough for the physics to be visible, not a more
+sensitive detector.
+
+---
+
+## 0024 — Interface vocabulary is translated at the API boundary (2026-07-26)
+
+**Decision.** The trace keeps the precise internal term (`hypotheses`,
+`still_standing`, `not_enough_evidence`, `adaptive`). The dashboard API renames
+`hypotheses` to `possible_causes`, strips internal-vocabulary keys from the
+step args it echoes, and the loop writes the critic's verdict to the tape in
+plain words with hypothesis ids resolved back to the causes they stand for.
+
+**Why.** CLAUDE.md allows `src/` and `docs/` the precise term and forbids it in
+the UI. Putting the translation at the boundary keeps both true at once, and the
+boundary is the only place that knows something is about to be rendered. The
+jargon test scans template *source*, not just rendered output, which caught
+`run.hypotheses` sitting in an Alpine expression — a file the browser loads even
+though no user ever sees the word.

@@ -2,12 +2,13 @@
 
     python -m eval.runner build          # write the golden set
     python -m eval.runner run --engine rules
+    python -m eval.runner run --engine agent --split tuning
     python -m eval.runner run --engine rules --split heldback
 
-The agent engine lands at step 4. Until then `rules` is the only one, which is
-the intended order: the harness exists before the thing it measures, so the
-first number the agent ever produces is comparable to a baseline that already
-ran.
+Both engines answer the same questions over the same data and are scored by the
+same code, which is the only way the comparison in `docs/FINDINGS.md` means
+anything. The rules engine needs no API key; the agent does, and says so rather
+than degrading to something that looks like a result.
 """
 
 from __future__ import annotations
@@ -21,13 +22,17 @@ from typing import Any
 from eval.golden import build_golden_set, composition, load_cases, write_cases
 from eval.metrics import CaseScore, Prediction, aggregate, confusion, score_case
 from eval.scenarios import materialise
+from src.agent.llm import build_client
+from src.agent.loop_plain import investigate
 from src.baseline.rules import RulesEngine
-from src.config import REPO_ROOT
+from src.config import REPO_ROOT, Settings, build_clock
+from src.data.plant import load_plant
 from src.data.sources import SystemMetadata
 from src.physics.modelchain import module_gamma_pdc
 
 GOLDEN_DIR = REPO_ROOT / "eval" / "golden"
 DATA_DIR = REPO_ROOT / "data" / "raw"
+TRACE_DIR = REPO_ROOT / "traces"
 
 
 def _system_metadata(system_id: int) -> tuple[SystemMetadata, float]:
@@ -82,6 +87,88 @@ def run_rules_engine(cases: list[Any]) -> tuple[list[CaseScore], list[Prediction
     return scores, predictions
 
 
+def run_agent_engine(
+    cases: list[Any],
+    trace_root: Path | None = None,
+    max_tools_per_cycle: int = 8,
+) -> tuple[list[CaseScore], list[Prediction]]:
+    """Run the plain-Python investigation loop over the golden set.
+
+    Every case gets a fresh client, so one investigation's budget cannot be
+    spent by another and the per-question cost figure means what it says.
+    Traces are written per case and are what the dashboard's Investigate tab
+    replays.
+    """
+    settings = Settings.from_env()
+    clock = build_clock()
+    root = trace_root or TRACE_DIR / "eval"
+
+    scores: list[CaseScore] = []
+    predictions: list[Prediction] = []
+
+    for case in cases:
+        bundle = load_plant(case.system_id, DATA_DIR)
+        materialised = materialise(case, DATA_DIR)
+        ctx = bundle.context(materialised.frame, scope=f"{bundle.meta.name} / array")
+        client = build_client(load_models_config_cached(), settings.anthropic_api_key)
+
+        started = time.monotonic()
+        out = investigate(
+            case.question,
+            ctx,
+            client,
+            clock,
+            investigation_id=f"INV-{case.id}",
+            start=case.start,
+            end=case.end,
+            trace_root=root,
+            max_tools_per_cycle=max_tools_per_cycle,
+        )
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+
+        finding = out.finding
+        # A synthesis that could not be filed as a finding is scored as an
+        # unsettled answer with nothing behind it, which is what it is. Quietly
+        # dropping the case would flatter the engine by removing its failures
+        # from the denominator.
+        predictions.append(
+            Prediction(
+                case_id=case.id,
+                category=finding.category if finding and finding.settled else None,
+                cause=finding.cause if finding else None,
+                settled=bool(finding and finding.settled),
+                candidate_causes=tuple(
+                    c.cause for c in (finding.candidate_causes if finding else [])
+                ),
+                resolving_measurement=(
+                    finding.resolving_measurement if finding else None
+                ),
+                tools_called=tuple(out.tools_called),
+                unplanned_tools=tuple(out.unplanned_tools),
+                critic_cycles=out.state.cycle,
+                cost_usd=out.cost_usd,
+                latency_ms=elapsed_ms,
+            )
+        )
+        scores.append(score_case(case, predictions[-1]))
+        print(
+            f"  {case.id}  {len(out.tools_called)} measurements, "
+            f"{len(out.unplanned_tools)} unplanned, "
+            f"${out.cost_usd:.3f}, "
+            f"{'settled' if predictions[-1].settled else 'not enough evidence'}"
+        )
+        if out.ungrounded_numbers:
+            print(f"         UNGROUNDED FIGURES: {out.ungrounded_numbers}")
+
+    return scores, predictions
+
+
+def load_models_config_cached() -> Any:
+    from src.config import load_models_config
+
+    return load_models_config()
+
+
 def _cmd_build(args: argparse.Namespace) -> int:
     cases = build_golden_set(system_id=args.system)
     tuning = [c for c in cases if c.split == "tuning"]
@@ -106,11 +193,15 @@ def _cmd_run(args: argparse.Namespace) -> int:
             return 1
         cases.extend(load_cases(paths[split]))
 
-    if args.engine != "rules":
-        print(f"engine {args.engine!r} arrives at a later build step")
-        return 1
-
-    scores, predictions = run_rules_engine(cases)
+    if args.engine == "rules":
+        scores, predictions = run_rules_engine(cases)
+    else:
+        print(f"\nrunning the agent over {len(cases)} cases\n")
+        try:
+            scores, predictions = run_agent_engine(cases)
+        except RuntimeError as exc:
+            print(exc)
+            return 1
     report = aggregate(scores, predictions)
 
     print(f"\n=== {args.engine} engine, {len(cases)} cases ===\n")

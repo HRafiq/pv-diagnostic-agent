@@ -111,6 +111,12 @@ def _build_for_split(
     def seed_for(label: str) -> int:
         return derive_seed(base_seed, split, label)
 
+    def extend(window: tuple[str, str], days: int) -> tuple[str, str]:
+        """Lengthen a window forward. Some faults are only visible over months."""
+        return window[0], str(
+            (pd.Timestamp(window[1]) + pd.Timedelta(days=days)).date()
+        )
+
     def w_at(i: int) -> tuple[str, str]:
         # Splits carry different numbers of windows, so wrap rather than
         # index out of range. Reusing a window across cases is fine — the
@@ -174,25 +180,38 @@ def _build_for_split(
         settled=True,
         injection={
             "kind": "shading",
+            # UTC hours. The site logs at UTC-5, so this is 07:00-10:00 local:
+            # the morning shadow the question asks about.
+            # Three strings of seven at 55% depth costs about 6% of the
+            # window's energy. One string at 40% costs 1.5%, which sits under
+            # the noise of every tool in the set — the case would be scoring
+            # coin flips rather than reasoning.
             "params": {
                 "hour_start": 12,
                 "hour_end": 15,
-                "depth": 0.4,
+                "depth": 0.55,
+                "strings_affected": 3,
                 "seed": seed_for("shading"),
             },
         },
         expected_reasoning_elements=[
             "the loss appears only in a fixed band of the day",
             "correlates with time of day, not with irradiance level",
+            "part of the array is affected and part is not, but only in that band",
         ],
         notes="Time-of-day dependence is the discriminator against a string fault.",
     )
 
     # --- recoverable ------------------------------------------------------
+    # Soiling is diagnosed over months, not fortnights. At a realistic
+    # temperate accumulation rate a two-week window moves the performance ratio
+    # by less than the weather does, so the case would be unanswerable in
+    # principle and would score coin flips rather than reasoning.
+    _soil_window = extend(w_at(3), 30)
     add(
         system_id=system_id,
-        start=w_at(3)[0],
-        end=w_at(3)[1],
+        start=_soil_window[0],
+        end=_soil_window[1],
         question="Performance has been slipping for a month. Why?",
         expected_category="recoverable",
         expected_cause="soiling",
@@ -309,7 +328,14 @@ def _build_for_split(
         ),
         injection={
             "kind": "curtailment",
-            "params": {"ceiling_kw": 150.0, "seed": seed_for("curtail")},
+            # 200 kW against a 260 kW inverter, on windows whose clear days
+            # reach 240-255 kW, so the ceiling is actually hit on most of them.
+            # Low enough that a limit is clearly being applied, close enough to
+            # the rating that an inverter holding its own configured ceiling is
+            # a live explanation. At the original 150 kW the plateau sat at 58%
+            # of nameplate, which no inverter does to itself — the pair was
+            # quietly resolvable and the case was not testing what it claimed.
+            "params": {"ceiling_kw": 200.0, "seed": seed_for("curtail")},
         },
         expected_reasoning_elements=[
             "a flat ceiling is present",
