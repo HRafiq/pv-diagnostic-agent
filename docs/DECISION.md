@@ -317,3 +317,63 @@ the gap the agent has to fill, and it is now measured rather than asserted.
 The agency metrics double as their own control: a known pipeline scores 2
 trajectories and 0.000 unplanned measurements. If the agent scores the same,
 it is a pipeline too — and the metric will say so.
+
+---
+
+## 0016 — PVDAQ has no fault logs; ground truth is injection-only (2026-07-25)
+
+**Finding.** Searched the entire `pvdaq/` tree and the `2023-solar-data-prize/`
+datasets for any table named fault / event / maintenance / outage / alarm / log
+/ label / annotation. There are none. The bucket holds telemetry plus equipment
+metadata and nothing else. A system's metadata JSON has exactly seven sections
+(System, Site, Mount, Inverters, Modules, Meters, Other Instruments); the
+`comments` field on 4902 is an empty string, and a full-text search of a
+metadata blob for `fault|outage|maintenance|event|alarm|repair|downtime|label`
+returns nothing.
+
+**This corrects an earlier expectation.** PVDAQ was chosen partly as "the best
+chance at real labelled events". It does not have them. The §5.2 row "real data,
+real known events" is **zero**, and the README says so.
+
+**Consequences.**
+
+1. Ground truth is injection-only, which raises the stakes on injecting at the
+   physics layer rather than the signature layer — it is the only truth the
+   evaluation has.
+2. Real-data-no-injection cases survive for anything verifiable from physics
+   alone: summer temperature derating and a genuinely cloudy week need no
+   maintenance log, because the temperature coefficient and the irradiance
+   record *are* the label. Two such cases sit in each split.
+3. The 35-day mid-2016 telemetry gap is a real, found, unlabelled event —
+   discovered by the physics, not by a log. Worth promoting into the golden set
+   as its own case rather than only being the motivation for a bug fix.
+4. **Open:** string 7's share of DC current runs persistently below its even
+   share in the untouched data. That is either a smaller combiner or a real
+   long-standing fault, and without a maintenance log it cannot be settled —
+   which is itself a fair illustration of the problem this project is about.
+
+**Alternatives considered.** (a) A dataset with logs — none reachable from this
+environment, and few exist publicly in any case. (b) Treating operator forum
+posts or publications as labels — unverifiable and not reproducible. (c)
+Accepting injection-only ground truth and saying so plainly in the README —
+chosen.
+
+---
+
+## 0017 — pvlib primitives, not `ModelChain` (2026-07-25)
+
+**Decision.** The expectation model uses pvlib for solar position, Ineichen
+clear-sky, Perez transposition, airmass, extraterrestrial irradiance and the CEC
+module database. The PVWatts DC and inverter equations are written out directly
+rather than assembled through `pvlib.modelchain.ModelChain`.
+
+**Why.** Handoff §7 step 1 says "pvlib ModelChain". Two reasons for the
+deviation. `ModelChain` expects a complete `PVSystem`/`Array` specification and
+runs the full weather-to-AC chain, whereas this model is driven by *measured*
+POA and needs only the DC-temperature-inverter portion. And keeping those five
+lines of arithmetic explicit makes the anti-circularity boundary auditable: a
+reader can see there is no plant simulation in the file. Inside a `ModelChain`
+call that is a much harder claim to check.
+
+**Cost.** Losing `ModelChain`'s loss tree and its ability to swap DC models by
+name. Neither is wanted here — the coarseness is deliberate.

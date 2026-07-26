@@ -160,6 +160,15 @@ Datasets are never committed. The ingest downloads into a gitignored `data/raw/`
 and writes a manifest with a SHA-256 per source file, the resolved channel map,
 and the timezone finding — so the dataset is reproducible without shipping it.
 
+**No fault logs exist.** PVDAQ ships telemetry and equipment metadata only —
+there is no maintenance, outage or event table anywhere in the archive. Ground
+truth therefore comes from physics-level injection onto the measured series,
+which is why injecting at the physics layer rather than the signature layer
+matters so much: it is the only truth the evaluation has. Cases that need no
+label survive as real untouched data — summer temperature derating and a cloudy
+week are verifiable from the temperature coefficient and the irradiance record
+alone.
+
 Three things the ingest does that are easy to get wrong:
 
 - **Channel resolution is by physical plausibility, not name.** This system
