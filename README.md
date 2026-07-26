@@ -21,7 +21,7 @@ causes, says so and names the cheap test that would.
 The output is one of three instructions: **send someone, schedule something, or
 do nothing.** The third is the one nobody sells and often the most valuable.
 
-> **Status: steps 0–7 of 13 complete.** Real data ingested, physics validated,
+> **Status: steps 0–9 of 13 complete.** Real data ingested, physics validated,
 > fault injector and evaluation harness running with a rules baseline scored,
 > and the agent loop taking measurements end to end with its reasoning on
 > screen. See *Build progress* below.
@@ -83,7 +83,7 @@ cp .env.example .env          # ANTHROPIC_API_KEY needed only for agent nodes
 ```
 
 ```bash
-pytest                                    # 459 tests
+pytest                                    # 528 tests
 ruff check . && mypy src eval simulator   # lint + types
 
 python watcher.py status                  # clock, models, config
@@ -94,6 +94,10 @@ python -m eval.runner build
 python -m eval.runner run --engine rules            # no API key needed
 python -m eval.runner run --engine agent --split tuning
 python -m eval.runner compare --split heldback     # rules vs agent, side by side
+python -m eval.runner retrieval                    # retrieval ablation
+
+python watcher.py run --until 2016-09-01 --step 14D --engine rules
+python watcher.py findings
 
 uvicorn dashboard.app:app --reload        # http://127.0.0.1:8000
 ```
@@ -145,9 +149,9 @@ the dashboard reads.
 | 5 | Full atomic tool set (18), domain knowledge, golden set to 86 | **done** |
 | 6 | Critic with structured verdict, iteration cap, not-enough-evidence path | **done** |
 | 7 | Rules baseline through the shared tools + comparison harness | **done** |
-| 8 | Watcher: sweep, findings store with lifecycle, energy ranking. Tab 2 | next |
-| 9 | RAG layer + retrieval golden set + ablation | |
-| 10 | Saved analyses registry with golden-case enforcement | |
+| 8 | Watcher: sweep, findings store with lifecycle, energy ranking. Tab 2 | **done** |
+| 9 | RAG layer + retrieval golden set + ablation | **done** |
+| 10 | Saved analyses registry with golden-case enforcement | next |
 | 11 | Full evaluation, agency metrics, both experiments, `docs/FINDINGS.md` | |
 | 12 | LangGraph port; verify identical golden-set outputs | |
 | 13 | README with honest results, including whatever the ablations showed | |

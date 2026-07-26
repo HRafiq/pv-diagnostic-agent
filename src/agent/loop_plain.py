@@ -41,6 +41,7 @@ from src.agent.state import AgentState, CriticVerdict
 from src.clock import Clock
 from src.findings.models import Finding
 from src.knowledge import KnowledgeBase, load_knowledge
+from src.rag.retriever import Retriever
 from src.tools import ToolContext, ToolResult, slice_window
 from src.trace.models import TraceStep
 from src.trace.writer import TraceWriter
@@ -106,7 +107,7 @@ def investigate(
     max_tools_per_cycle: int = 8,
     trace_root: Path | str | None = None,
     critic: Critic | None | Literal[False] = None,
-    knowledge: KnowledgeBase | None = None,
+    knowledge: Retriever | KnowledgeBase | None = None,
 ) -> InvestigationResult:
     """Run one investigation end to end.
 
@@ -119,10 +120,12 @@ def investigate(
             runs with no review at all, which is the ablation that says whether
             the critic earns its cost. A `send_back` verdict replans with the
             critic's instruction in hand.
-        knowledge: Domain knowledge retrieved for the planner's candidate
-            causes and handed to the router and synthesiser as evidence. Pass
-            `False`-y to run without it — that is the step 9 ablation, and the
-            whole reason it is an argument rather than an import.
+        knowledge: Where the agent's background evidence comes from. Defaults
+            to the hand-written knowledge base; pass a `CorpusRetriever` to use
+            retrieval over the document corpus instead, or an empty
+            `KnowledgeBase` to run with none. Both satisfy the same two-method
+            interface, which is what makes the step 9 ablation a comparison
+            rather than two different code paths.
     """
     window = slice_window(ctx.frame, start, end)
     brief = plant_brief(ctx, question, window)

@@ -226,6 +226,10 @@ data/raw/
 data/interim/
 data/processed/
 corpus/raw/
+# Third-party documents are never committed; corpus/manifest.json is.
+corpus/*.txt
+corpus/*.md
+!corpus/README.md
 traces/
 .env
 *.parquet

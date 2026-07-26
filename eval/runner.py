@@ -238,6 +238,43 @@ def _cmd_compare(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_retrieval(args: argparse.Namespace) -> int:
+    """Score retrieval over the golden queries and print the ablation."""
+    from eval.retrieval import ablation, score_retrieval
+    from src.rag.corpus import build_corpus
+    from src.rag.index import HybridIndex, corpus_stats
+
+    chunks, files = build_corpus()
+    stats = corpus_stats(chunks)
+    print(
+        f"\ncorpus: {stats.chunks} chunks from {stats.sources} source(s), "
+        f"{stats.tokens} tokens"
+    )
+    for name, count in sorted(stats.by_source.items()):
+        print(f"  {count:>4}  {name}")
+    if not files:
+        print(
+            "  (no ingested documents — drop .txt or .md files in corpus/ to "
+            "grow it; only checksums are ever committed)"
+        )
+
+    table = ablation(chunks, k=args.k)
+    print("\n" + table.to_string(index=False))
+    note = table.attrs.get("note")
+    if note:
+        print(f"\n  {note}")
+
+    report = score_retrieval(HybridIndex(chunks), k=args.k)
+    if report.misses:
+        print("\n  queries where nothing relevant came back:")
+        for miss in report.misses:
+            print(f"    {miss}")
+    if args.out:
+        Path(args.out).write_text(json.dumps(report.to_dict(), indent=2))
+        print(f"\n  wrote {args.out}")
+    return 0
+
+
 def _cmd_build(args: argparse.Namespace) -> int:
     cases = build_golden_set(system_id=args.system)
     tuning = [c for c in cases if c.split == "tuning"]
@@ -351,6 +388,13 @@ def main(argv: list[str] | None = None) -> int:
     p_cmp.add_argument("--no-review", action="store_true")
     p_cmp.add_argument("--no-knowledge", action="store_true")
     p_cmp.set_defaults(func=_cmd_compare)
+
+    p_ret = sub.add_parser(
+        "retrieval", help="Score retrieval over the golden queries and ablate."
+    )
+    p_ret.add_argument("--k", type=int, default=10)
+    p_ret.add_argument("--out", type=str, default=None)
+    p_ret.set_defaults(func=_cmd_retrieval)
 
     args = parser.parse_args(argv)
     return int(args.func(args))

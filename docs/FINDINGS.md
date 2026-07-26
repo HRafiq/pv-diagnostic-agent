@@ -199,3 +199,61 @@ fault. Six telemetry-gap cases per split were mislabelled on that alone.
   without it.
 - **Combiner 7.** Unresolvable without a maintenance log, and a live example of
   why `not_enough_evidence` needs to be a first-class answer.
+
+---
+
+## Retrieval (step 9)
+
+```bash
+python -m eval.runner retrieval
+```
+
+18 golden queries of three kinds over a 23-chunk corpus. **The corpus is the
+project's own knowledge base**: no third-party documents were reachable from
+this environment, and the repository ships checksums rather than text in any
+case (`corpus/README.md`).
+
+| configuration | top-1 | reciprocal rank | direct | discriminating | paraphrase |
+| --- | --- | --- | --- | --- | --- |
+| BM25 only | 0.389 | 0.625 | 0.806 | 0.611 | 0.458 |
+| vectors only | 0.444 | 0.626 | **1.000** | 0.389 | 0.489 |
+| hybrid, no rerank | 0.556 | 0.719 | 0.917 | 0.611 | 0.631 |
+| **hybrid + rerank** | **0.556** | **0.728** | 0.917 | 0.611 | **0.657** |
+
+### "Right document in top 10" is not reported, on purpose
+
+It scores **1.000 for every configuration** — including ones that have learned
+nothing — because 10 of 23 chunks is 43% of the corpus. Quoting it would be the
+most flattering and least honest number in the project. `RetrievalReport`
+detects the saturation, the ablation table drops the column, and reciprocal rank
+is used instead. Growing the corpus is what makes the intended metric usable,
+and the ingest path exists for exactly that.
+
+### What the ablation says
+
+**Fusion earns its place; the reranker barely does.** Hybrid beats either stage
+alone by about 0.09 of reciprocal rank — a real margin. The reranker adds 0.009
+on top, which on 18 queries is one query moving one position. On this evidence
+the reranker is close to cost without benefit, and it stays in only because the
+corpus is too small to conclude either way. That is a finding, not a hedge.
+
+**The two stages fail in opposite directions, which is why fusing works.** The
+vector stage is perfect on direct queries (1.000) and worst on discriminating
+ones (0.389); BM25 is the reverse. Neither ordering is an accident: character
+n-grams match a named cause almost exactly, and lose badly when the question is
+"how do I tell these two apart" and the words are shared between both answers.
+
+**Paraphrase queries are the weakest column and that is an honest limitation.**
+No embedding API was reachable and no local transformer was available, so the
+dense stage is character n-gram TF-IDF — a genuinely different signal from BM25
+but *not* a semantic one. It will not match "the array is dirty" to "soiling"
+the way a sentence embedding would. The paraphrase queries exist specifically so
+that gap shows up as 0.657 rather than being taken on trust.
+
+### What is still not measured
+
+**Whether retrieval changes the agent's accuracy at all.** That is the ablation
+that matters, it needs an API key, and `--no-knowledge` runs the identical loop
+without it. The numbers above say retrieval finds the right passage; they say
+nothing about whether the agent diagnoses better for having read it. If it turns
+out not to, the layer should come out.

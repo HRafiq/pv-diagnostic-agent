@@ -23,6 +23,9 @@ dependencies = [
 
     # --- agent --------------------------------------------------------------
     "anthropic==0.62.0",
+    # LangGraph is the step 12 port, kept as a core dependency so the
+    # equivalence test runs in CI rather than being skipped.
+    "langgraph==0.6.7",
 
     # --- dashboard (FastAPI + Jinja2 + Alpine.js/Plotly.js from static) -----
     "fastapi==0.116.1",
