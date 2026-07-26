@@ -651,3 +651,57 @@ faults 0.375 / 0.500. The abstention column is structural: the engine commits to
 the first rule that fires and has no way to hold two causes open. That is the
 gap the agent exists to fill, and it is now measured over five unresolvable
 cases per split rather than one.
+
+---
+
+## 0029 — What the critic is not allowed to decide (2026-07-26)
+
+**Decision.** Three parts of `CriticVerdict` are computed and then overridden
+onto whatever the model returned. The critic can be stricter than the model
+wanted; it can never be looser.
+
+1. **Unsupported claims** come from the deterministic grounding check, unioned
+   with anything the model adds. A model asked to inspect its own arithmetic and
+   pronounce it sound is not a check. If a figure is not in a tool's ledger it is
+   unsupported, and no verdict can clear it.
+2. **A look-alike counts as checked** only when a tool whose `discriminates` tag
+   names it was actually run *and* the critic says it weighed it. The
+   intersection, not the union: measuring without weighing is not consideration,
+   and claiming without measuring is box-ticking — which is exactly what the
+   checklist exists to stop. All seven items are reachable, and a test asserts
+   it, because an unreachable item would make `accept` impossible.
+3. **A verdict that fails the contract becomes `send_back`.** A critic that
+   cannot produce a valid verdict has not reviewed the answer. Falling through
+   to accept would be the precise failure this node exists to prevent.
+
+`accept` is additionally blocked by any unsupported claim or any unchecked
+look-alike — those are `CriticVerdict`'s own validators, and the node now feeds
+them figures the model did not choose.
+
+**Consequence, seen immediately in a test.** An answer built on a single
+measurement is sent back however confident the review is, because one tool
+cannot address seven look-alikes. That is the intended behaviour and it is the
+main reason the cycle cap exists.
+
+---
+
+## 0030 — The router gets a third action: look it up (2026-07-26)
+
+**Decision.** `action` is now `call_tool | look_up | stop`. On `look_up` the
+router names two causes and gets back what is known about telling those two
+apart, which joins the evidence the synthesiser sees.
+
+**Why.** This is the promotion the router needed to be a full node rather than a
+tool selector. Choosing to find out *what would separate* two candidates before
+spending a measurement on one of them is a routing decision, and often the right
+one: the lookup is free and can avoid a measurement that would not have decided
+anything.
+
+It is recorded as `was_planned=False` on the tape, because it never appears in
+the plan and it is a genuine departure — the reason the router gives for it is
+as much an agency signal as the reason for an off-plan measurement.
+
+**The two bounds.** A lookup does not consume a measurement slot, so the inner
+loop now carries two limits: one on measurements, which is what costs money, and
+one on router turns, so a router that keeps asking for free lookups still
+terminates. An unbounded number of free calls is still an unbounded loop.

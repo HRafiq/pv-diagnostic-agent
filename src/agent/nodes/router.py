@@ -34,11 +34,18 @@ __all__ = ["ROUTE_SCHEMA", "RouterDecision", "route"]
 ROUTE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["action", "tool", "args", "reason_for_choosing", "excludes"],
+    "required": [
+        "action",
+        "tool",
+        "args",
+        "look_up_causes",
+        "reason_for_choosing",
+        "excludes",
+    ],
     "properties": {
         "action": {
             "type": "string",
-            "enum": ["call_tool", "stop"],
+            "enum": ["call_tool", "look_up", "stop"],
             "description": (
                 "'stop' when one cause stands, or when no remaining tool would "
                 "separate the survivors."
@@ -62,6 +69,14 @@ ROUTE_SCHEMA: dict[str, Any] = {
                 "One specific sentence: what this would separate, and why now."
             ),
         },
+        "look_up_causes": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "For 'look_up': the two causes to fetch the distinguishing "
+                "test for. Empty otherwise."
+            ),
+        },
         "excludes": {
             "type": "array",
             "items": {"type": "string"},
@@ -73,15 +88,18 @@ ROUTE_SCHEMA: dict[str, Any] = {
 
 @dataclass(frozen=True)
 class RouterDecision:
-    action: Literal["call_tool", "stop"]
+    action: Literal["call_tool", "look_up", "stop"]
     tool: str = ""
     args: dict[str, Any] = field(default_factory=dict)
     reason: str = ""
     excludes: list[str] = field(default_factory=list)
+    look_up_causes: list[str] = field(default_factory=list)
     response: LLMResponse | None = None
 
     @property
     def stops(self) -> bool:
+        if self.action == "look_up":
+            return not self.look_up_causes
         return self.action == "stop" or not self.tool
 
 
@@ -131,12 +149,22 @@ def route(
     payload = response.parsed or {}
     action = payload.get("action", "stop")
     tool = str(payload.get("tool") or "")
+    reason = str(payload.get("reason_for_choosing", ""))
+    excludes = [str(x) for x in payload.get("excludes", [])]
+
+    if action == "look_up":
+        causes = [str(c) for c in payload.get("look_up_causes", []) if str(c).strip()]
+        return RouterDecision(
+            action="look_up",
+            reason=reason,
+            excludes=excludes,
+            look_up_causes=causes,
+            response=response,
+        )
+
     if action != "call_tool" or tool not in tool_names():
         return RouterDecision(
-            action="stop",
-            reason=str(payload.get("reason_for_choosing", "")),
-            excludes=[str(x) for x in payload.get("excludes", [])],
-            response=response,
+            action="stop", reason=reason, excludes=excludes, response=response
         )
 
     args = payload.get("args") or {}
@@ -144,7 +172,7 @@ def route(
         action="call_tool",
         tool=tool,
         args=dict(args) if isinstance(args, dict) else {},
-        reason=str(payload.get("reason_for_choosing", "")),
-        excludes=[str(x) for x in payload.get("excludes", [])],
+        reason=reason,
+        excludes=excludes,
         response=response,
     )

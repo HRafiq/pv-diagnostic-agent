@@ -129,15 +129,24 @@ def run(
     answers: list[dict[str, Any]],
     ctx: ToolContext,
     clock: FrozenClock,
+    reviews: list[dict[str, Any]] | None = None,
     **kwargs: Any,
 ) -> Any:
+    """Drive one investigation from scripted replies.
+
+    Review is off unless the caller scripts one, so a test about routing or
+    grounding exercises exactly the path it is about. The critic has its own
+    tests below.
+    """
     client = ScriptedClient(
         replies={
             "planner": list(plans),
             "router": list(routes),
             "synthesizer": list(answers),
+            "critic": list(reviews or []),
         }
     )
+    kwargs.setdefault("critic", None if reviews else False)
     return investigate(
         "Output is down on this array. What happened?",
         ctx,
@@ -402,6 +411,7 @@ def test_the_per_cycle_cap_stops_a_router_that_never_stops(
         clock,
         investigation_id="INV-CAP",
         max_tools_per_cycle=3,
+        critic=False,
     )
     assert len(out.tools_called) == 3
     assert "per-cycle measurement cap" in out.stopped_because
@@ -537,7 +547,7 @@ def test_a_quoted_figure_passes(ctx: ToolContext, clock: FrozenClock) -> None:
             "synthesizer": [a_settled_answer()],
         }
     )
-    first = investigate("q", ctx, client, clock, investigation_id="INV-A")
+    first = investigate("q", ctx, client, clock, investigation_id="INV-A", critic=False)
     measured = first.results[0].values["pr_temperature_corrected"]
 
     out = run(
@@ -580,9 +590,10 @@ def _verdict(kind: str, **kw: Any) -> CriticVerdict:
     )
 
 
-def test_without_a_critic_the_loop_is_a_single_pass(
+def test_with_review_switched_off_the_loop_is_a_single_pass(
     ctx: ToolContext, clock: FrozenClock
 ) -> None:
+    """The ablation that says whether the critic earns its cost."""
     out = run(
         [a_plan(["compute_temp_corrected_pr"])],
         [a_call("compute_temp_corrected_pr"), a_stop()],
@@ -746,7 +757,9 @@ def test_the_cost_column_sums_to_the_investigation_total(
         return response
 
     priced.complete = priced_complete  # type: ignore[method-assign]
-    out = investigate("q", ctx, priced, clock, investigation_id="INV-COST")
+    out = investigate(
+        "q", ctx, priced, clock, investigation_id="INV-COST", critic=False
+    )
 
     assert out.llm_calls == 4
     assert out.cost_usd == pytest.approx(0.04)
@@ -866,7 +879,7 @@ def test_scripted_client_fails_loudly_when_a_reply_is_missing(
     """A silent stub would produce a run that looks complete and means nothing."""
     client = ScriptedClient(replies={"planner": [a_plan(["check_ac_ceiling"])]})
     with pytest.raises(AssertionError, match="no reply queued for node 'router'"):
-        investigate("q", ctx, client, clock, investigation_id="INV-X")
+        investigate("q", ctx, client, clock, investigation_id="INV-X", critic=False)
 
 
 def test_the_tool_catalogue_reaches_the_planner(ctx: ToolContext) -> None:
@@ -925,7 +938,7 @@ def test_knowledge_is_retrieved_after_planning_never_before(
             "synthesizer": [a_settled_answer()],
         }
     )
-    investigate("q", ctx, client, clock, investigation_id="INV-K")
+    investigate("q", ctx, client, clock, investigation_id="INV-K", critic=False)
 
     planner_prompt = next(u for node, _, u in client.calls if node == "planner")
     router_prompt = next(u for node, _, u in client.calls if node == "router")
@@ -969,8 +982,107 @@ def test_the_knowledge_layer_can_be_switched_off_for_the_ablation(
         }
     )
     out = investigate(
-        "q", ctx, client, clock, investigation_id="INV-ABL", knowledge=empty
+        "q",
+        ctx,
+        client,
+        clock,
+        investigation_id="INV-ABL",
+        knowledge=empty,
+        critic=False,
     )
     assert not any(s.kind == "retrieval" for s in out.steps)
     router_prompt = next(u for node, _, u in client.calls if node == "router")
     assert "WHAT IS KNOWN ABOUT THESE CAUSES" not in router_prompt
+
+
+# ===========================================================================
+# The router's third action (step 6)
+# ===========================================================================
+def a_lookup(causes: list[str], reason: str = "") -> dict[str, Any]:
+    return {
+        "action": "look_up",
+        "tool": "",
+        "args": {},
+        "look_up_causes": causes,
+        "reason_for_choosing": reason or "not sure which observation separates these",
+        "excludes": [],
+    }
+
+
+def test_the_router_can_ask_what_separates_two_causes(
+    ctx: ToolContext, clock: FrozenClock
+) -> None:
+    """A lookup costs nothing to run and can save a measurement that would not
+    have decided anything. That is a routing decision, so the router makes it."""
+    out = run(
+        [a_plan(["check_ac_ceiling"], [("H1", "clipping"), ("H2", "curtailment")])],
+        [
+            a_lookup(
+                ["clipping", "curtailment"],
+                reason="both fit the flat top; find out what tells them apart",
+            ),
+            a_call("check_ac_ceiling"),
+            a_stop(),
+        ],
+        [an_unsettled_answer()],
+        ctx,
+        clock,
+    )
+    lookups = [s for s in out.steps if s.kind == "retrieval"]
+    # One automatic after planning, one the router asked for.
+    assert len(lookups) == 2
+    asked = lookups[1]
+    assert asked.args is not None
+    assert asked.args["asked_about"] == ["clipping", "curtailment"]
+    assert asked.was_planned is False
+    assert "tells them apart" in (asked.reason_for_choosing or "")
+
+
+def test_a_lookup_does_not_spend_the_measurement_budget(
+    ctx: ToolContext, clock: FrozenClock
+) -> None:
+    out = run(
+        [a_plan(["check_ac_ceiling"])],
+        [
+            a_lookup(["clipping", "curtailment"]),
+            a_lookup(["soiling", "sensor_drift"]),
+            a_call("check_ac_ceiling"),
+            a_stop(),
+        ],
+        [a_settled_answer()],
+        ctx,
+        clock,
+        max_tools_per_cycle=2,
+    )
+    assert out.tools_called == ["check_ac_ceiling"]
+    assert len([s for s in out.steps if s.kind == "retrieval"]) == 3
+
+
+def test_a_lookup_with_no_causes_stops_the_cycle(
+    ctx: ToolContext, clock: FrozenClock
+) -> None:
+    out = run(
+        [a_plan(["check_ac_ceiling"])],
+        [a_lookup([])],
+        [a_settled_answer()],
+        ctx,
+        clock,
+    )
+    assert out.tools_called == []
+    assert out.synthesis is not None
+
+
+def test_what_the_lookup_found_reaches_the_synthesiser(
+    ctx: ToolContext, clock: FrozenClock
+) -> None:
+    client = ScriptedClient(
+        replies={
+            "planner": [a_plan(["check_ac_ceiling"], [("H1", "a flat top")])],
+            "router": [a_lookup(["clipping", "curtailment"]), a_stop()],
+            "synthesizer": [an_unsettled_answer()],
+            "critic": [],
+        }
+    )
+    investigate("q", ctx, client, clock, investigation_id="INV-LU", critic=False)
+    synth_prompt = next(u for node, _, u in client.calls if node == "synthesizer")
+    assert "NOT SEPARABLE" in synth_prompt

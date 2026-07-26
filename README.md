@@ -21,7 +21,7 @@ causes, says so and names the cheap test that would.
 The output is one of three instructions: **send someone, schedule something, or
 do nothing.** The third is the one nobody sells and often the most valuable.
 
-> **Status: steps 0–5 of 13 complete.** Real data ingested, physics validated,
+> **Status: steps 0–6 of 13 complete.** Real data ingested, physics validated,
 > fault injector and evaluation harness running with a rules baseline scored,
 > and the agent loop taking measurements end to end with its reasoning on
 > screen. See *Build progress* below.
@@ -80,7 +80,7 @@ cp .env.example .env          # ANTHROPIC_API_KEY needed only for agent nodes
 ```
 
 ```bash
-pytest                                    # 416 tests
+pytest                                    # 440 tests
 ruff check . && mypy src eval simulator   # lint + types
 
 python watcher.py status                  # clock, models, config
@@ -139,8 +139,8 @@ the dashboard reads.
 | 3 | Evaluation harness — runner, metrics, agency metrics, rules baseline | **done** |
 | 4 | Vertical slice: plain-Python loop, 9 measurement tools, Tab 3 | **done** |
 | 5 | Full atomic tool set (18), domain knowledge, golden set to 86 | **done** |
-| 6 | Critic with structured verdict, iteration cap, not-enough-evidence path | next |
-| 7 | Rules-engine baseline + first rules-vs-agent comparison | |
+| 6 | Critic with structured verdict, iteration cap, not-enough-evidence path | **done** |
+| 7 | Rules-engine baseline + first rules-vs-agent comparison | next |
 | 8 | Watcher: sweep, findings store with lifecycle, energy ranking. Tab 2 | |
 | 9 | RAG layer + retrieval golden set + ablation | |
 | 10 | Saved analyses registry with golden-case enforcement | |
@@ -160,10 +160,17 @@ Each step is gated: it stops for review before the next one starts.
 
 The planner enumerates candidate causes — benign ones included, since a plan
 containing only faults has already decided the answer — and opens a line of
-enquiry. The router picks one measurement at a time and may depart from the plan
-whenever a result points elsewhere. The synthesiser writes the finding and is
-allowed no arithmetic. The reviewer arrives at step 6; until then the loop is a
-single pass.
+enquiry. The router picks one measurement at a time, may depart from the plan
+whenever a result points elsewhere, and may instead ask what separates two
+candidates before spending a measurement on either. The synthesiser writes the
+finding and is allowed no arithmetic.
+
+The reviewer returns a structured verdict and cannot return prose. Three parts
+of that verdict are not its to decide: a figure with no measurement behind it is
+unsupported however the review reads it, a look-alike counts as considered only
+if a measurement bearing on it was actually taken, and a review that cannot
+produce a valid verdict becomes another round rather than a silent approval. The
+reviewer can be stricter than the model wanted; it can never be looser.
 
 The whole loop runs against a scripted client with no network and no API key, so
 its control flow, its caps, its abstention path and the tape it writes are all

@@ -932,7 +932,7 @@ SPECS: tuple[ToolSpec, ...] = (
         question_answered="Is the irradiance sensor telling the truth?",
         args_model=ClearSkyArgs,
         fn=check_clearsky_consistency,
-        discriminates=("irradiance_sensor_drift", "soiling", "weather"),
+        discriminates=("sensor_drift", "soiling", "weather"),
     ),
     ToolSpec(
         name="check_ac_ceiling",
@@ -954,7 +954,7 @@ SPECS: tuple[ToolSpec, ...] = (
         question_answered="Is the apparent loss a plant problem or a logger problem?",
         args_model=WindowArgs,
         fn=profile_data_quality,
-        discriminates=("telemetry_gaps", "real_loss"),
+        discriminates=("telemetry_gap", "real_loss"),
     ),
     ToolSpec(
         name="characterize_onset",
@@ -966,7 +966,7 @@ SPECS: tuple[ToolSpec, ...] = (
         question_answered="Did this arrive abruptly or accumulate?",
         args_model=OnsetArgs,
         fn=characterize_onset,
-        discriminates=("string_outage", "soiling", "irradiance_sensor_drift"),
+        discriminates=("string_outage", "soiling", "sensor_drift"),
     ),
     ToolSpec(
         name="time_of_day_profile",
@@ -990,7 +990,7 @@ SPECS: tuple[ToolSpec, ...] = (
         ),
         args_model=TrendArgs,
         fn=daily_performance_trend,
-        discriminates=("soiling", "irradiance_sensor_drift", "string_outage"),
+        discriminates=("soiling", "sensor_drift", "string_outage"),
     ),
 )
 

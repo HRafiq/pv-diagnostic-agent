@@ -804,8 +804,7 @@ DIAGNOSTIC_SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
         name="dc_to_ac_conversion",
         description=(
-            "Measured AC against measured DC power, and how it moves across "
-            "the window."
+            "Measured AC against measured DC power, and how it moves across the window."
         ),
         question_answered="Is the loss on the array side or at the inverter?",
         args_model=WindowArgs,
@@ -855,7 +854,7 @@ DIAGNOSTIC_SPECS: tuple[ToolSpec, ...] = (
         question_answered="Is a sensor frozen rather than merely wrong?",
         args_model=StuckArgs,
         fn=detect_stuck_channels,
-        discriminates=("sensor_fault", "telemetry_gaps"),
+        discriminates=("sensor_fault", "telemetry_gap"),
     ),
     ToolSpec(
         name="check_night_offset",
@@ -866,7 +865,7 @@ DIAGNOSTIC_SPECS: tuple[ToolSpec, ...] = (
         question_answered="Is a channel biased away from zero?",
         args_model=WindowArgs,
         fn=check_night_offset,
-        discriminates=("irradiance_sensor_drift", "sensor_fault"),
+        discriminates=("sensor_drift", "sensor_fault"),
     ),
     ToolSpec(
         name="soiling_recovery_pattern",
@@ -877,7 +876,7 @@ DIAGNOSTIC_SPECS: tuple[ToolSpec, ...] = (
         question_answered="Does this loss come back by itself?",
         args_model=SoilingArgs,
         fn=soiling_recovery_pattern,
-        discriminates=("soiling", "string_outage", "irradiance_sensor_drift"),
+        discriminates=("soiling", "string_outage", "sensor_drift"),
     ),
     ToolSpec(
         name="string_onset_scan",

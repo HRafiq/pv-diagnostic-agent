@@ -22,6 +22,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 from src.agent.grounding import check_numeric_grounding
 from src.agent.llm import BudgetExceeded, LLMClient, LLMResponse
@@ -34,6 +35,7 @@ from src.agent.nodes import (
     route,
     synthesize,
 )
+from src.agent.nodes.critic import review as run_review
 from src.agent.nodes.prompts import plant_brief
 from src.agent.state import AgentState, CriticVerdict
 from src.clock import Clock
@@ -46,7 +48,9 @@ from src.trace.writer import TraceWriter
 __all__ = ["Critic", "InvestigationResult", "investigate"]
 
 # A critic sees the state, the measurements and the draft, and returns a
-# structured verdict. Never prose (CLAUDE.md).
+# structured verdict. Never prose (CLAUDE.md). The default is the LLM critic in
+# `nodes/critic.py`; tests substitute their own, and passing `False` runs the
+# loop without review, which is how the critic's own contribution is measured.
 Critic = Callable[[AgentState, list[ToolResult], Synthesis], CriticVerdict]
 
 
@@ -101,7 +105,7 @@ def investigate(
     max_cycles: int = 4,
     max_tools_per_cycle: int = 8,
     trace_root: Path | str | None = None,
-    critic: Critic | None = None,
+    critic: Critic | None | Literal[False] = None,
     knowledge: KnowledgeBase | None = None,
 ) -> InvestigationResult:
     """Run one investigation end to end.
@@ -111,8 +115,10 @@ def investigate(
             supposed to stop itself when nothing further would separate the
             surviving causes; this catches the case where it does not, so a run
             fails loudly at a known bound rather than draining the budget.
-        critic: Absent at step 4. When supplied, a `send_back` verdict replans
-            with the critic's instruction in hand.
+        critic: `None` uses the LLM critic; a callable substitutes one; `False`
+            runs with no review at all, which is the ablation that says whether
+            the critic earns its cost. A `send_back` verdict replans with the
+            critic's instruction in hand.
         knowledge: Domain knowledge retrieved for the planner's candidate
             causes and handed to the router and synthesiser as evidence. Pass
             `False`-y to run without it — that is the step 9 ablation, and the
@@ -232,20 +238,77 @@ def investigate(
 
             # ---------------- route / execute -------------------------------
             stop_decision: RouterDecision | None = None
-            for _ in range(max_tools_per_cycle):
+            measurements_this_cycle = 0
+            # Two bounds, because they catch different failures. The first caps
+            # *measurements*, which is what costs money and time. The second
+            # caps router turns, so a router that keeps asking for lookups
+            # instead of measuring still terminates — a lookup is free, but an
+            # unbounded number of free calls is still an unbounded loop.
+            for _ in range(2 * max_tools_per_cycle + 4):
+                if measurements_this_cycle >= max_tools_per_cycle:
+                    out.stopped_because = "hit the per-cycle measurement cap"
+                    break
                 decision = route(
                     client,
                     state,
                     brief,
                     out.results,
                     out.errors,
-                    calls_remaining=max_tools_per_cycle - len(state.tools_called),
+                    calls_remaining=max_tools_per_cycle - measurements_this_cycle,
                     knowledge=knowledge_brief,
                 )
                 if decision.stops:
                     stop_decision = decision
                     _apply_exclusions(state, decision.excludes)
                     break
+
+                if decision.action == "look_up":
+                    # The router asked what separates two causes rather than
+                    # measuring. It costs nothing to run and can save a
+                    # measurement that would not have decided anything, so it
+                    # does not count against the per-cycle measurement cap.
+                    _accrue(out, decision.response)
+                    _apply_exclusions(state, decision.excludes)
+                    matched = knowledge_base.match(decision.look_up_causes)
+                    fetched = knowledge_base.brief_for(matched)
+                    if fetched not in knowledge_brief:
+                        knowledge_brief = "\n\n".join(
+                            filter(None, [knowledge_brief, fetched])
+                        )
+                    emit(
+                        TraceStep(
+                            kind="retrieval",
+                            node="knowledge",
+                            args={
+                                "asked_about": decision.look_up_causes,
+                                "matched_causes": matched,
+                                "cycle": state.cycle,
+                            },
+                            result=(
+                                "Looked up what separates "
+                                + " and ".join(decision.look_up_causes)
+                                + (
+                                    ""
+                                    if matched
+                                    else " — nothing known about those causes"
+                                )
+                            ),
+                            was_planned=False,
+                            reason_for_choosing=(
+                                decision.reason
+                                or "the router asked what separates these two "
+                                "before spending a measurement"
+                            ),
+                            tokens=decision.response.tokens if decision.response else 0,
+                            cost_usd=(
+                                decision.response.cost_usd if decision.response else 0.0
+                            ),
+                            latency_ms=(
+                                decision.response.latency_ms if decision.response else 0
+                            ),
+                        )
+                    )
+                    continue
 
                 # The router may narrow the window; it may not widen it past
                 # the investigation.
@@ -261,6 +324,7 @@ def investigate(
 
                 execution = execute(ctx, state, decision, decision.response)
                 _accrue(out, decision.response)
+                measurements_this_cycle += 1
                 state.tools_called.append(decision.tool)
                 _apply_exclusions(state, decision.excludes)
                 step = execution.step
@@ -281,7 +345,9 @@ def investigate(
                 elif execution.error:
                     out.errors.append(execution.error)
             else:
-                out.stopped_because = "hit the per-cycle measurement cap"
+                out.stopped_because = (
+                    "the router took its whole turn allowance without stopping"
+                )
 
             # ---------------- synthesise ------------------------------------
             synthesis = synthesize(
@@ -343,10 +409,17 @@ def investigate(
             )
 
             # ---------------- review ----------------------------------------
-            if critic is None:
+            if critic is False:
                 break
 
-            verdict = critic(state, out.results, synthesis)
+            if critic is None:
+                reviewed = run_review(
+                    client, state, brief, out.results, out.errors, synthesis
+                )
+                _accrue(out, reviewed.response)
+                verdict = reviewed.verdict
+            else:
+                verdict = critic(state, out.results, synthesis)
             state.verdicts.append(verdict)
             emit(
                 TraceStep(

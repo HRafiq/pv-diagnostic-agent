@@ -111,6 +111,11 @@ You may narrow a tool's window with `start` and `end` when a result suggests
 something changed on a particular date. Re-running the same tool over a
 different window is a legitimate and often decisive move.
 
+You may also choose `look_up` instead of a measurement, naming two causes, to
+fetch what is known about telling those two apart. Do that when two candidates
+are close and you are not sure which observation separates them — it costs
+nothing to run and may save a measurement that would not have decided anything.
+
 Stop when either:
 - one cause is left standing and the measurements support it, or
 - more than one is left standing and no remaining tool would separate them.
