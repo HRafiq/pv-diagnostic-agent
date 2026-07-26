@@ -705,3 +705,88 @@ as much an agency signal as the reason for an off-plan measurement.
 loop now carries two limits: one on measurements, which is what costs money, and
 one on router turns, so a router that keeps asking for free lookups still
 terminates. An unbounded number of free calls is still an unbounded loop.
+
+---
+
+## 0031 — The baseline measures through the same tools as the agent (2026-07-26)
+
+**Decision.** `RulesEngine` no longer implements its own arithmetic. It takes a
+`ToolContext` — the same object the agent gets — and calls the same eighteen
+tools through the same registry, then applies explicit thresholds to their
+ledgers.
+
+**Why.** The comparison is the deliverable. If the baseline measured
+differently, a gap between the two would be a gap in *measurement quality* and
+would say nothing about reasoning. Measuring identically isolates the only
+variable worth testing: what gets done with the numbers. It also means every
+improvement to a tool improves both engines, so the baseline cannot go stale
+and quietly become a straw man.
+
+Its structural limits are untouched and are the point: a fixed sequence in a
+fixed order, commit to the first rule that fires, no way to hold two causes
+open.
+
+**Two bugs this immediately exposed.**
+
+*A failed measurement read as a passing one.* The engine defaulted a missing
+completeness figure to 1.0, so a window where the performance ratio could not be
+computed **at all** passed the data-quality check and was then diagnosed as a
+string fault. Six telemetry-gap cases per split were mislabelled on that alone.
+The gap injector blanks the power channel while the logger keeps writing rows,
+so row coverage stays at 100% — `profile_data_quality` now also reports
+`lit_interval_completeness`, which is the number the question actually needs.
+
+*The first threshold fired on every case ever measured.* A per-string deficit
+threshold of 0.10 sits below combiner 7's ~12% standing anomaly, so all 86 cases
+came back as string faults and the false-alarm rate was 1.000. Raised to 0.22.
+
+**On the tuning of that threshold.** A sweep on the tuning split says 0.18
+maximises macro-F1. 0.22 was chosen instead: 0.18 buys 0.012 of overall accuracy
+and *doubles* the false-alarm rate, which is the number the field cares about,
+and it sits close enough to the standing anomaly that a slightly different
+window would push it over. Recorded because "we picked the best threshold" and
+"we picked the threshold that fails safely" are different claims.
+
+---
+
+## 0032 — The comparison is built to be losable (2026-07-26)
+
+**Decision.** `eval/compare.py` scores both engines with the same `aggregate()`,
+orders the headline metrics with the false-alarm rate and the correct-abstention
+rate **above** overall accuracy, prints signed differences, and lists every case
+the two answered differently with which engine got it right.
+
+**Why.** A comparison that quietly favours the thing being evaluated is worse
+than no comparison. Three specifics:
+
+- **The headline is not accuracy.** A detector that alarms on any deficit scores
+  well on clean faults and is useless in the field; only the look-alike column
+  exposes that.
+- **Differences are signed.** The table has to be readable when the agent loses.
+  Tests assert the arithmetic in both directions.
+- **The per-case disagreement list is the useful output.** An aggregate
+  difference of a few points says nothing about *why*; the list of cases that
+  moved says all of it. Winners are decided on **cause**, not category, because
+  two causes in one category can lead to opposite actions — "wash the array" and
+  "wipe the sensor" are both interventions and only one is on the plant.
+
+**Both ablations are flags, not plans.** `--no-review` and `--no-knowledge` run
+the identical loop with one layer removed. An ablation that cannot be run is a
+claim rather than a measurement, and a test asserts both flags exist.
+
+---
+
+## 0033 — `docs/FINDINGS.md` states the agent has not been run (2026-07-26)
+
+**Decision.** The findings document leads with the fact that no
+`ANTHROPIC_API_KEY` was available, so every number in it is baseline, physics or
+injector. The agent column is empty.
+
+**Why.** A half-finished evaluation is exactly the kind of thing that gets
+quietly presented as a whole one. The harness, the golden set, the metrics and
+the comparison are complete and tested; the agent column is empty because it has
+not been run, not because it is pending analysis, and the difference matters.
+
+The document also records the bugs the evaluation found in itself, each of which
+would have made a published accuracy figure meaningless. That section is
+deliberately not in an appendix.

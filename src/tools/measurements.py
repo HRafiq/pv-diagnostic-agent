@@ -604,12 +604,22 @@ def profile_data_quality(ctx: ToolContext, args: WindowArgs) -> ToolResult:
     daylight = lit >= 200.0
     orphaned = int((daylight & power.isna()).sum()) if len(power) else 0
 
+    # Row coverage answers "did the logger write a line?". It says nothing
+    # about whether the line had a power reading in it, and a gap injected by
+    # blanking the power channel leaves row coverage at 100%. The number that
+    # matters for a phantom deficit is the share of *well-lit* intervals that
+    # carried power at all.
+    lit_total = int(daylight.sum()) if len(lit) else 0
     values = {
         "coverage": report.coverage,
         "expected_samples": float(report.expected_samples),
         "actual_samples": float(report.actual_samples),
         "missing_days": float(len(report.missing_days)),
+        "lit_intervals": float(lit_total),
         "lit_intervals_without_power": float(orphaned),
+        "lit_interval_completeness": (
+            (lit_total - orphaned) / lit_total if lit_total else 1.0
+        ),
         "issue_count": float(len(report.issues)),
     }
     labels: dict[str, str] = {}
@@ -626,9 +636,11 @@ def profile_data_quality(ctx: ToolContext, args: WindowArgs) -> ToolResult:
         tool="profile_data_quality",
         summary=(
             f"{report.actual_samples} of an expected {report.expected_samples} "
-            f"readings are present ({report.coverage * 100:.1f}%), with "
-            f"{orphaned} well-lit intervals logging irradiance but no power, "
-            f"across {len(report.missing_days)} entirely missing days."
+            f"rows are present ({report.coverage * 100:.1f}%), but only "
+            f"{values['lit_interval_completeness'] * 100:.1f}% of the "
+            f"{lit_total} well-lit intervals carried a power reading — "
+            f"{orphaned} logged irradiance and no power, across "
+            f"{len(report.missing_days)} entirely missing days."
         ),
         values=values,
         labels=labels,

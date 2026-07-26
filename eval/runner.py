@@ -19,6 +19,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from eval.compare import compare, comparison_table
 from eval.golden import build_golden_set, composition, load_cases, write_cases
 from eval.metrics import CaseScore, Prediction, aggregate, confusion, score_case
 from eval.scenarios import materialise
@@ -28,6 +29,7 @@ from src.baseline.rules import RulesEngine
 from src.config import REPO_ROOT, Settings, build_clock
 from src.data.plant import load_plant
 from src.data.sources import SystemMetadata
+from src.knowledge import KnowledgeBase
 from src.physics.modelchain import module_gamma_pdc
 
 GOLDEN_DIR = REPO_ROOT / "eval" / "golden"
@@ -53,20 +55,15 @@ def run_rules_engine(cases: list[Any]) -> tuple[list[CaseScore], list[Prediction
     predictions: list[Prediction] = []
 
     for case in cases:
-        meta, gamma = _system_metadata(case.system_id)
-        engine = RulesEngine(
-            dc_capacity_kw=meta.dc_capacity_kw,
-            gamma_pdc=gamma,
-            latitude=meta.latitude,
-            longitude=meta.longitude,
-            altitude_m=meta.altitude_m,
-            tilt_deg=meta.tilt_deg,
-            azimuth_deg=meta.azimuth_deg,
-            ac_ceiling_kw=meta.ac_capacity_kw_hint,
-        )
+        bundle = load_plant(case.system_id, DATA_DIR)
         materialised = materialise(case, DATA_DIR)
+        # The same context the agent gets: the whole record, perturbed inside
+        # the case window. Both engines measure identically, so a gap between
+        # them is a gap in reasoning rather than in measurement.
+        ctx = bundle.context(materialised.full_record)
+        engine = RulesEngine(window={"start": case.start, "end": case.end})
         started = time.monotonic()
-        verdict = engine.diagnose(materialised.frame)
+        verdict = engine.diagnose(ctx)
         elapsed_ms = int((time.monotonic() - started) * 1000)
 
         prediction = Prediction(
@@ -91,6 +88,8 @@ def run_agent_engine(
     cases: list[Any],
     trace_root: Path | None = None,
     max_tools_per_cycle: int = 8,
+    review: bool = True,
+    use_knowledge: bool = True,
 ) -> tuple[list[CaseScore], list[Prediction]]:
     """Run the plain-Python investigation loop over the golden set.
 
@@ -102,6 +101,9 @@ def run_agent_engine(
     settings = Settings.from_env()
     clock = build_clock()
     root = trace_root or TRACE_DIR / "eval"
+    # The two ablations. Both run the *identical* loop with one layer removed,
+    # which is the only way to say whether that layer earns its cost.
+    knowledge = None if use_knowledge else KnowledgeBase(signatures={}, tests=())
 
     scores: list[CaseScore] = []
     predictions: list[Prediction] = []
@@ -128,6 +130,8 @@ def run_agent_engine(
             end=case.end,
             trace_root=root,
             max_tools_per_cycle=max_tools_per_cycle,
+            critic=None if review else False,
+            knowledge=knowledge,
         )
         elapsed_ms = int((time.monotonic() - started) * 1000)
 
@@ -174,6 +178,66 @@ def load_models_config_cached() -> Any:
     return load_models_config()
 
 
+def _run_engine(
+    engine: str, cases: list[Any], args: argparse.Namespace
+) -> tuple[list[CaseScore], list[Prediction]]:
+    if engine == "rules":
+        return run_rules_engine(cases)
+    print(f"\nrunning the agent over {len(cases)} cases\n")
+    return run_agent_engine(
+        cases,
+        review=not getattr(args, "no_review", False),
+        use_knowledge=not getattr(args, "no_knowledge", False),
+    )
+
+
+def _load_cases(split: str) -> list[Any]:
+    paths = {
+        "tuning": GOLDEN_DIR / "cases_tuning.jsonl",
+        "heldback": GOLDEN_DIR / "cases_heldback.jsonl",
+    }
+    splits = ["tuning", "heldback"] if split == "both" else [split]
+    cases: list[Any] = []
+    for name in splits:
+        if not paths[name].exists():
+            raise FileNotFoundError(
+                f"missing {paths[name]}; run `python -m eval.runner build` first"
+            )
+        cases.extend(load_cases(paths[name]))
+    return cases
+
+
+def _cmd_compare(args: argparse.Namespace) -> int:
+    """Run both engines over the same cases and print the comparison.
+
+    Published whichever way it falls. If the rules engine wins outright that is
+    a more credible finding than "I built an agent" (CLAUDE.md).
+    """
+    try:
+        cases = _load_cases(args.split)
+    except FileNotFoundError as exc:
+        print(exc)
+        return 1
+
+    runs: dict[str, tuple[list[CaseScore], list[Prediction], Any]] = {}
+    for engine in ("rules", "agent"):
+        try:
+            scores, predictions = _run_engine(engine, cases, args)
+        except RuntimeError as exc:
+            print(f"\ncannot run the {engine} engine: {exc}")
+            return 1
+        runs[engine] = (scores, predictions, aggregate(scores, predictions))
+
+    comparison = compare(runs)
+    for split in sorted({s.split for s in runs["rules"][0]}):
+        print(comparison_table(comparison, split))
+
+    if args.out:
+        Path(args.out).write_text(json.dumps(comparison.to_dict(), indent=2))
+        print(f"\n  wrote {args.out}")
+    return 0
+
+
 def _cmd_build(args: argparse.Namespace) -> int:
     cases = build_golden_set(system_id=args.system)
     tuning = [c for c in cases if c.split == "tuning"]
@@ -198,15 +262,11 @@ def _cmd_run(args: argparse.Namespace) -> int:
             return 1
         cases.extend(load_cases(paths[split]))
 
-    if args.engine == "rules":
-        scores, predictions = run_rules_engine(cases)
-    else:
-        print(f"\nrunning the agent over {len(cases)} cases\n")
-        try:
-            scores, predictions = run_agent_engine(cases)
-        except RuntimeError as exc:
-            print(exc)
-            return 1
+    try:
+        scores, predictions = _run_engine(args.engine, cases, args)
+    except RuntimeError as exc:
+        print(exc)
+        return 1
     report = aggregate(scores, predictions)
 
     print(f"\n=== {args.engine} engine, {len(cases)} cases ===\n")
@@ -269,7 +329,28 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_run.add_argument("--confusion", action="store_true")
     p_run.add_argument("--out", type=str, default=None)
+    p_run.add_argument(
+        "--no-review",
+        action="store_true",
+        help="Agent only: skip the critic. The ablation that prices review.",
+    )
+    p_run.add_argument(
+        "--no-knowledge",
+        action="store_true",
+        help="Agent only: run with no domain knowledge retrieved.",
+    )
     p_run.set_defaults(func=_cmd_run)
+
+    p_cmp = sub.add_parser(
+        "compare", help="Run both engines over the same cases and compare."
+    )
+    p_cmp.add_argument(
+        "--split", default="heldback", choices=["tuning", "heldback", "both"]
+    )
+    p_cmp.add_argument("--out", type=str, default=None)
+    p_cmp.add_argument("--no-review", action="store_true")
+    p_cmp.add_argument("--no-knowledge", action="store_true")
+    p_cmp.set_defaults(func=_cmd_compare)
 
     args = parser.parse_args(argv)
     return int(args.func(args))

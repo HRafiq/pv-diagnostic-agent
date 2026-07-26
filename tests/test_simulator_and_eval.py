@@ -413,28 +413,32 @@ def test_agency_on_empty_input() -> None:
 # Rules baseline
 # --------------------------------------------------------------------------
 def _engine() -> object:
+    """The baseline, configured for the synthetic fixture.
+
+    Since step 7 the engine measures through the shared tool registry rather
+    than its own arithmetic, so it needs a `ToolContext` rather than plant
+    parameters — the same object the agent gets. That is the point of the
+    change: both engines take identical measurements, so a difference between
+    them is a difference in reasoning.
+
+    The clear-sky check is relaxed here because the fixture is a plain sine
+    rather than a real clear-sky curve and sits far from the modelled envelope
+    by construction. These tests are about the rules, not the fixture.
+    """
     from src.baseline.rules import RulesEngine
 
-    return RulesEngine(
-        dc_capacity_kw=100.0,
-        gamma_pdc=GAMMA,
-        latitude=39.13,
-        longitude=-77.21,
-        altitude_m=138.0,
-        tilt_deg=20.0,
-        azimuth_deg=180.0,
-        ac_ceiling_kw=90.0,
-        # The synthetic fixture is a plain sine, not a real clear-sky curve, so
-        # it sits far from the modelled envelope by construction. Relax the
-        # sensor check here so these tests exercise the rule under test rather
-        # than an artefact of the fixture.
-        clearsky_shortfall=0.99,
-    )
+    return RulesEngine(clearsky_shortfall=0.99, clearsky_drift_per_day=-99.0)
+
+
+def _diagnose(frame: pd.DataFrame) -> object:
+    from tests.conftest import context_for
+
+    return _engine().diagnose(context_for(frame))  # type: ignore[attr-defined]
 
 
 def test_rules_engine_flags_a_telemetry_gap() -> None:
     frame, _ = inject_telemetry_gap(base_frame(), "2017-06-02", "2017-06-18")
-    verdict = _engine().diagnose(frame)  # type: ignore[attr-defined]
+    verdict = _diagnose(frame)
     assert verdict.cause == "telemetry_gap"
 
 
@@ -442,7 +446,7 @@ def test_rules_engine_finds_a_string_outage() -> None:
     frame, _ = inject_string_outage(
         base_frame(), "2017-06-01", "2017-06-21", string_index=3, fraction_lost=1.0
     )
-    verdict = _engine().diagnose(frame)  # type: ignore[attr-defined]
+    verdict = _diagnose(frame)
     assert verdict.category == "fault"
 
 
@@ -455,15 +459,15 @@ def test_rules_engine_always_commits() -> None:
     frame, _ = inject_curtailment(
         base_frame(), "2017-06-01", "2017-06-21", ceiling_kw=55.0
     )
-    verdict = _engine().diagnose(frame)  # type: ignore[attr-defined]
+    verdict = _diagnose(frame)
     assert verdict.settled is True
     assert verdict.candidate_causes == ()
 
 
 def test_rules_engine_runs_a_fixed_check_sequence() -> None:
-    a = _engine().diagnose(base_frame())  # type: ignore[attr-defined]
+    a = _diagnose(base_frame())
     frame, _ = inject_soiling(base_frame(days=30), *WINDOW)
-    b = _engine().diagnose(frame)  # type: ignore[attr-defined]
+    b = _diagnose(frame)
     # Same checks regardless of what the data showed — the definition of a
     # pipeline, and the thing the agency metrics are built to detect.
     assert a.checks_run[: len(b.checks_run)] == b.checks_run[: len(a.checks_run)]

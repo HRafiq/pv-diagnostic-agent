@@ -21,7 +21,7 @@ causes, says so and names the cheap test that would.
 The output is one of three instructions: **send someone, schedule something, or
 do nothing.** The third is the one nobody sells and often the most valuable.
 
-> **Status: steps 0–6 of 13 complete.** Real data ingested, physics validated,
+> **Status: steps 0–7 of 13 complete.** Real data ingested, physics validated,
 > fault injector and evaluation harness running with a rules baseline scored,
 > and the agent loop taking measurements end to end with its reasoning on
 > screen. See *Build progress* below.
@@ -46,9 +46,12 @@ means it is a pipeline in disguise. Alongside it: distinct tool trajectories,
 critic-iteration spread, and self-initiated abstentions.
 
 **A rules engine is the baseline, not a component.** A deterministic rules engine
-runs on the same golden set, and the comparison is published whichever way it
-falls. If the rules engine wins outright, that is a more credible finding than
-"I built an agent".
+runs on the same golden set *and calls the same eighteen tools*, so a gap between
+the two is a gap in reasoning rather than in measurement. The comparison is
+published whichever way it falls, its headline is the false-alarm rate rather
+than overall accuracy, and its differences are signed so the table stays readable
+when the agent loses. If the rules engine wins outright, that is a more credible
+finding than "I built an agent".
 
 **The evaluation is designed to be able to fail.** Faults are injected at the
 physics layer, never the signature layer, so the diagnostic logic has to
@@ -80,7 +83,7 @@ cp .env.example .env          # ANTHROPIC_API_KEY needed only for agent nodes
 ```
 
 ```bash
-pytest                                    # 440 tests
+pytest                                    # 459 tests
 ruff check . && mypy src eval simulator   # lint + types
 
 python watcher.py status                  # clock, models, config
@@ -90,6 +93,7 @@ python -m src.data.cli ingest --system 4902 --years 2016 2017
 python -m eval.runner build
 python -m eval.runner run --engine rules            # no API key needed
 python -m eval.runner run --engine agent --split tuning
+python -m eval.runner compare --split heldback     # rules vs agent, side by side
 
 uvicorn dashboard.app:app --reload        # http://127.0.0.1:8000
 ```
@@ -140,8 +144,8 @@ the dashboard reads.
 | 4 | Vertical slice: plain-Python loop, 9 measurement tools, Tab 3 | **done** |
 | 5 | Full atomic tool set (18), domain knowledge, golden set to 86 | **done** |
 | 6 | Critic with structured verdict, iteration cap, not-enough-evidence path | **done** |
-| 7 | Rules-engine baseline + first rules-vs-agent comparison | next |
-| 8 | Watcher: sweep, findings store with lifecycle, energy ranking. Tab 2 | |
+| 7 | Rules baseline through the shared tools + comparison harness | **done** |
+| 8 | Watcher: sweep, findings store with lifecycle, energy ranking. Tab 2 | next |
 | 9 | RAG layer + retrieval golden set + ablation | |
 | 10 | Saved analyses registry with golden-case enforcement | |
 | 11 | Full evaluation, agency metrics, both experiments, `docs/FINDINGS.md` | |
@@ -229,7 +233,13 @@ Three things the ingest does that are easy to get wrong:
 
 ## Results
 
-Nothing to report yet. When there is, it goes in `docs/FINDINGS.md` and here —
-including whichever way the rules-vs-agent comparison and the retrieval ablation
-fall. If retrieval turns out not to move accuracy, that is a finding and it gets
-published.
+**The agent has not been scored yet** — no API key was available in the
+environment this was built in, so `docs/FINDINGS.md` carries the rules baseline,
+the physics validation and the bugs the evaluation found in itself, with the
+agent column explicitly empty rather than pending.
+
+The rules baseline, on 43 held-back cases: overall accuracy 0.469, false alarms
+on look-alikes 0.056, and **correct "not enough evidence" 0.000** — which no
+amount of tuning changes, because the engine commits to the first rule that fires
+and cannot hold two causes open. That number is the one to watch when the agent
+column is filled in.
