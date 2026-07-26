@@ -9,12 +9,19 @@ from __future__ import annotations
 
 import argparse
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 import watcher
 from src.config import build_clock
+
+# One dry sweep of one day. The `--data-dir` these tests pass points at a
+# synthetic ingested system (see `ingested_plant` in conftest), so they assert
+# CLI plumbing without depending on whether the PVDAQ download has been run on
+# this machine. Nothing here is scored.
+SWEEP = ["step", "--step", "1D", "--dry-run"]
 
 
 @pytest.mark.parametrize(
@@ -57,8 +64,9 @@ def test_status_reports_clock_and_models(capsys: pytest.CaptureFixture[str]) -> 
 
 def test_step_advances_and_reports_the_window(
     capsys: pytest.CaptureFixture[str],
+    ingested_plant: Path,
 ) -> None:
-    assert watcher.main(["step", "--step", "1D", "--dry-run"]) == 0
+    assert watcher.main([*SWEEP, "--data-dir", str(ingested_plant)]) == 0
     out = capsys.readouterr().out
     assert "advanced" in out
     assert "sweeping" in out
@@ -71,24 +79,52 @@ def test_run_rejects_a_past_target(capsys: pytest.CaptureFixture[str]) -> None:
     assert "not in the future" in capsys.readouterr().err
 
 
-def test_run_walks_forward_in_steps(capsys: pytest.CaptureFixture[str]) -> None:
+def test_run_walks_forward_in_steps(
+    capsys: pytest.CaptureFixture[str],
+    ingested_plant: Path,
+) -> None:
     start = build_clock().now().date()
     until = start + timedelta(days=4)
     assert (
-        watcher.main(["run", "--until", str(until), "--step", "1D", "--dry-run"]) == 0
+        watcher.main(
+            [
+                "run",
+                "--until",
+                str(until),
+                "--step",
+                "1D",
+                "--dry-run",
+                "--data-dir",
+                str(ingested_plant),
+            ]
+        )
+        == 0
     )
     out = capsys.readouterr().out
     assert out.count("sweeping") == 4
     assert "reached" in out
 
 
-def test_a_dry_run_writes_no_findings(tmp_path: Any) -> None:
+def test_a_dry_run_writes_no_findings(tmp_path: Any, ingested_plant: Path) -> None:
     """A dry run must be visibly a dry run, not a silent no-op."""
     store = tmp_path / "s.jsonl"
-    assert (
-        watcher.main(["step", "--step", "1D", "--dry-run", "--store", str(store)]) == 0
-    )
+    argv = [*SWEEP, "--data-dir", str(ingested_plant), "--store", str(store)]
+    assert watcher.main(argv) == 0
     assert not store.exists()
+
+
+def test_a_missing_ingest_is_reported_not_raised(
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Any,
+) -> None:
+    """The remedy is a command, so the sweep prints it and exits non-zero.
+
+    This is the path the three tests above used to take on any machine without
+    the PVDAQ download — it exits 1, which is correct, and it is asserted here
+    rather than being mistaken for a plumbing failure.
+    """
+    assert watcher.main([*SWEEP, "--data-dir", str(tmp_path / "empty")]) == 1
+    assert "is not ingested" in capsys.readouterr().err
 
 
 def test_the_replay_clock_starts_inside_the_ingested_record() -> None:

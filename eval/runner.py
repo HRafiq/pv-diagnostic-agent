@@ -246,6 +246,16 @@ def _cmd_experiments(args: argparse.Namespace) -> int:
     """
     from eval.experiments import ABLATIONS, ablation_table, repeat, summarise_runs
 
+    # Checked before any work, not on the first LLM call. Four ablations over
+    # 43 cases each load a plant and materialise an injection before they reach
+    # a client, so a missing key would otherwise surface minutes in, after the
+    # command has already printed a header that looks like a run in progress.
+    try:
+        Settings.from_env().require_api_key()
+    except RuntimeError as exc:
+        print(f"cannot run the experiments: {exc}")
+        return 1
+
     try:
         cases = _load_cases(args.split)
     except FileNotFoundError as exc:
@@ -263,6 +273,12 @@ def _cmd_experiments(args: argparse.Namespace) -> int:
         try:
             runs = repeat(label, run_agent_engine, cases, n=args.runs, **options)
         except RuntimeError as exc:
+            print(f"\ncannot run the experiments: {exc}")
+            return 1
+        except FileNotFoundError as exc:
+            # A missing ingest is a setup problem with a known remedy, and the
+            # exception already carries the command that fixes it. Printing it
+            # beats a traceback out of the middle of an ablation loop.
             print(f"\ncannot run the experiments: {exc}")
             return 1
         results.append(summarise_runs(runs, args.split))

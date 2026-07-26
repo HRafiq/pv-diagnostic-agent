@@ -10,6 +10,9 @@ proving the two agree with each other.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -146,3 +149,79 @@ def ctx(plant: pd.DataFrame) -> ToolContext:
 @pytest.fixture
 def clock() -> FrozenClock:
     return FrozenClock(pd.Timestamp("2017-04-15T12:00:00Z").to_pydatetime())
+
+
+# ---------------------------------------------------------------------------
+# An ingested system on disk.
+#
+# Several CLI tests exercise commands that begin by loading an ingested plant.
+# Pointing them at the real `data/raw/` makes them pass on a machine where the
+# PVDAQ download has been run and fail on a fresh clone — the suite would then
+# be reporting the state of one laptop rather than the state of the repository.
+# `data/` is gitignored and the download is hundreds of megabytes, so the fix
+# is a synthetic system written in the ingest layout, not a committed dataset.
+#
+# This is CLI plumbing only: does the command advance the clock, print the
+# window, honour --dry-run. Nothing here is scored. Evaluation cases still run
+# exclusively on real measured data with physics-level injections, for the
+# reason given at the top of this file.
+# ---------------------------------------------------------------------------
+
+# Matches the replay clock's start in config/site_defaults.yaml (2017-02-01)
+# with enough history in front of it to fill a 14-day trailing window and
+# enough after it for a multi-step `watcher run` to walk forward.
+INGEST_START = "2016-12-15"
+INGEST_DAYS = 75
+
+# A module the CEC database does not contain, on purpose: `load_plant` then
+# takes its stated fallback gamma instead of a looked-up one, so the fixture
+# does not depend on which pvlib release is installed.
+FIXTURE_MODULE = "Test Module 300W (not in CEC)"
+
+
+def write_ingested_plant(
+    root: Path,
+    system_id: int = 4902,
+    frame: pd.DataFrame | None = None,
+) -> Path:
+    """Write a synthetic system in the layout `load_plant` reads.
+
+    Returns the directory, so a caller can pass it straight to `--data-dir`.
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    if frame is None:
+        frame = synthetic_frame(days=INGEST_DAYS, start=INGEST_START)
+
+    frame.to_parquet(root / f"system_{system_id}_2016_2017.parquet")
+    manifest = {
+        "system_id": system_id,
+        "timezone": {"offset_hours": 0.0},
+        "system_metadata": {
+            "system_id": system_id,
+            "name": "Synthetic Test Plant",
+            "latitude": 39.13,
+            # Longitude 0, for the same reason `context_for` uses it: the
+            # fixture's day peaks at 12:00 UTC, and a real longitude would put
+            # modelled solar noon hours away from it.
+            "longitude": 0.0,
+            "altitude_m": 138.0,
+            "location": "nowhere",
+            "dc_capacity_kw": CAPACITY_KW,
+            "tilt_deg": 20.0,
+            "azimuth_deg": 180.0,
+            "tracking": False,
+            "module_model": FIXTURE_MODULE,
+            "module_quantity": 350,
+            "modules_per_string": 50,
+            "strings": STRINGS,
+            "inverter_model": "Test Inverter 95kW",
+        },
+    }
+    (root / f"system_{system_id}_manifest.json").write_text(json.dumps(manifest))
+    return root
+
+
+@pytest.fixture(scope="session")
+def ingested_plant(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A data directory holding one synthetic ingested system."""
+    return write_ingested_plant(tmp_path_factory.mktemp("data_raw"))

@@ -989,3 +989,56 @@ other mechanical guard — `test_no_wall_clock.py` — exists for the same class
 defect: a mistake that produces no error, only a quietly wrong result. Ignored
 source files belong in that class. Green tests say the code on this disk works;
 they say nothing about whether that code is what the repository contains.
+
+---
+
+## 0041 — No test reads the ingested dataset from disk (2026-07-26)
+
+**The bug.** Four tests — three in `test_watcher_cli.py`, one in
+`test_experiments.py` — began by loading system 4902 out of `data/raw/`. That
+directory is gitignored and the ingest is a download, so the tests passed on a
+machine where `python -m src.data.cli ingest` had been run and failed on every
+other one. Found the same way as DECISION 0040: a fresh clone on a second
+machine.
+
+**Why it was wrong on its own terms, not just inconvenient.** A unit test states
+a property of the code. These stated a property of one laptop's filesystem. The
+three watcher tests assert CLI plumbing — the clock advances, the window is
+printed, `--dry-run` writes nothing — and none of that needs eight megabytes of
+measured irradiance. They reached for the real dataset only because
+`sweep_once` had no way to be pointed anywhere else.
+
+**Decision.**
+
+- `watcher` gains `--data-dir`. Useful beyond the tests — a sweep can run
+  against an alternate ingest — and it is what lets the tests supply their own
+  plant instead of borrowing the machine's.
+- `tests/conftest.py` gains `write_ingested_plant()` and an `ingested_plant`
+  fixture: the existing synthetic frame written to a tmpdir in the ingest
+  layout, parquet plus manifest. It is a *test article* for CLI plumbing, and
+  the file's opening note still holds — nothing scored ever runs on it.
+  Evaluation cases remain real measured data with physics-level injections.
+- The failure path is now asserted rather than merely suffered:
+  `test_a_missing_ingest_is_reported_not_raised` pins that a sweep with no data
+  prints the remedy and exits 1.
+
+**A live-API hazard found while fixing it.** The experiments test asserted only
+`main(...) == 1`. It passed for the wrong reason on a clean machine — no
+ingested data, not no key. Asserting on the message instead exposed the real
+problem: `Settings.from_env()` calls `load_dotenv`, so deleting the environment
+variable does not produce a keyless run once a developer has a `.env`. On such
+a machine that test would have launched a live 43-case evaluation against the
+paid API. The test now patches `Settings.from_env` itself.
+
+`_cmd_experiments` was also changed to require the key *before* loading cases.
+Four ablations over 43 cases each load a plant and materialise an injection
+before they reach a client, so a missing key surfaced minutes in, underneath a
+header that looked like a run in progress. `test_the_key_is_checked_before_any_case_is_loaded`
+pins the ordering.
+
+**And the structural fix: CI.** `.github/workflows/ci.yml` runs ruff, mypy and
+the suite on 3.11 and 3.12 from a clean checkout with no data directory and no
+API key. Both this and DECISION 0040 were invisible locally and would have been
+caught on the first push. A job step fails the build if `data/raw/` ever
+contains a parquet file, so the tests cannot quietly reacquire the dependency
+they just shed.

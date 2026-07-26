@@ -1,0 +1,67 @@
+# The suite, run against what the repository actually contains.
+#
+# This exists because of two bugs that a local run could not see, both found by
+# a fresh clone on a second machine:
+#
+#   1. `.gitignore` matched `src/findings/` and two modules were never
+#      committed. Every local check was green; the clone failed to import.
+#   2. Four tests loaded the ingested PVDAQ dataset from `data/raw/`. It is
+#      gitignored, so they passed wherever the download had been run and failed
+#      everywhere else.
+#
+# Both are the same failure: a green local suite says the code on that disk
+# works, not that the repository does. The checkout below has no data directory
+# and no API key, which is the state every new contributor starts from.
+
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Confirm the checkout has no ingested data
+        # If a future change commits the dataset, these tests stop proving they
+        # are independent of it and this job should say so rather than pass.
+        run: |
+          if compgen -G "data/raw/*.parquet" > /dev/null; then
+            echo "data/raw/ contains a dataset; the suite is no longer proving"
+            echo "it runs on a clean checkout. See CLAUDE.md, repository hygiene."
+            exit 1
+          fi
+          echo "clean: no ingested data present"
+
+      - name: Lint
+        run: |
+          python -m ruff check .
+          python -m ruff format --check .
+
+      - name: Types
+        run: python -m mypy src eval simulator dashboard
+
+      - name: Tests
+        # No ANTHROPIC_API_KEY is set. Everything except the agent's LLM path
+        # must run without one, and the tests that cover that path use the
+        # scripted client rather than the network.
+        run: python -m pytest -q

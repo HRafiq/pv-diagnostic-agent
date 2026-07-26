@@ -148,9 +148,53 @@ def test_the_ablation_table_names_every_configuration() -> None:
     assert "median_cost_usd" in table.columns
 
 
-def test_the_experiments_command_needs_a_key_and_says_so() -> None:
+def _without_a_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make `Settings.from_env()` keyless, whatever the machine has.
+
+    Deleting the environment variable is not enough: `from_env` calls
+    `load_dotenv` and puts it straight back from `.env`. On a developer machine
+    with a real key that would turn the tests below into a live 43-case
+    evaluation against the paid API — the exact opposite of what they assert.
+    """
+    from src.config import Settings
+
+    monkeypatch.setattr(
+        Settings,
+        "from_env",
+        classmethod(lambda cls: cls(anthropic_api_key=None)),
+    )
+
+
+def test_the_experiments_command_needs_a_key_and_says_so(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     """Without one it must fail loudly, not return a shape that looks like a
-    result."""
+    result.
+
+    The exit code alone is not the assertion. This command has several ways to
+    return 1 — no golden set, no ingested data — and a test that checked only
+    the code would keep passing while the key check itself was gone.
+    """
     from eval.runner import main
 
+    _without_a_key(monkeypatch)
+
     assert main(["experiments", "--split", "heldback", "--runs", "1"]) == 1
+    assert "ANTHROPIC_API_KEY is not set" in capsys.readouterr().out
+
+
+def test_the_key_is_checked_before_any_case_is_loaded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failing fast is the point: four ablations over 43 cases each load a
+    plant and materialise an injection before they would reach a client."""
+    import eval.runner as runner
+
+    def explode(*_: Any, **__: Any) -> None:
+        raise AssertionError("cases were loaded before the key was checked")
+
+    _without_a_key(monkeypatch)
+    monkeypatch.setattr(runner, "_load_cases", explode)
+
+    assert runner.main(["experiments", "--split", "heldback", "--runs", "1"]) == 1

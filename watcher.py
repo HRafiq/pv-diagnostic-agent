@@ -95,6 +95,15 @@ def main(argv: list[str] | None = None) -> int:
         target.add_argument("--lookback", type=int, default=14)
         target.add_argument("--store", type=str, default=None)
         target.add_argument("--dry-run", action="store_true")
+        # Defaults to data/raw/. Overridable so a sweep can run against an
+        # alternate ingest, and so the CLI tests do not silently depend on
+        # whether the PVDAQ download happens to be present on this machine.
+        target.add_argument(
+            "--data-dir",
+            type=str,
+            default=None,
+            help="Directory of ingested systems (default: data/raw).",
+        )
 
     p_step = sub.add_parser("step", help="Advance one interval and sweep once.")
     add_sweep_args(p_step)
@@ -183,8 +192,9 @@ def sweep_once(args: argparse.Namespace, clock: Clock) -> int:
     start, end = trailing_window(now, args.lookback)
     print(f"  sweeping {start} .. {end}")
 
+    data_dir = Path(args.data_dir) if getattr(args, "data_dir", None) else None
     try:
-        bundle = load_plant(args.system)
+        bundle = load_plant(args.system, data_dir)
     except FileNotFoundError as exc:
         print(f"  {exc}", file=sys.stderr)
         return 1
