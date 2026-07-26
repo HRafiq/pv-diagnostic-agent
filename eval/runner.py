@@ -19,6 +19,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
+
 from eval.compare import compare, comparison_table
 from eval.golden import build_golden_set, composition, load_cases, write_cases
 from eval.metrics import CaseScore, Prediction, aggregate, confusion, score_case
@@ -219,6 +221,12 @@ def _cmd_compare(args: argparse.Namespace) -> int:
         print(exc)
         return 1
 
+    try:
+        _check_the_record_covers_every_case(cases)
+    except (RecordTooShort, FileNotFoundError) as exc:
+        print(f"\n{exc}")
+        return 1
+
     runs: dict[str, tuple[list[CaseScore], list[Prediction], Any]] = {}
     for engine in ("rules", "agent"):
         try:
@@ -260,6 +268,12 @@ def _cmd_experiments(args: argparse.Namespace) -> int:
         cases = _load_cases(args.split)
     except FileNotFoundError as exc:
         print(exc)
+        return 1
+
+    try:
+        _check_the_record_covers_every_case(cases)
+    except (RecordTooShort, FileNotFoundError) as exc:
+        print(f"\n{exc}")
         return 1
 
     wanted = (
@@ -348,6 +362,49 @@ def _cmd_build(args: argparse.Namespace) -> int:
     return 0
 
 
+class RecordTooShort(RuntimeError):
+    """The ingested record does not cover every golden-case window."""
+
+
+def _check_the_record_covers_every_case(cases: list[Any]) -> None:
+    """Fail before the first case rather than partway through.
+
+    The golden windows are fixed dates. A record that stops early — almost
+    always a download cut short by a network failure rather than an archive
+    that ends there — makes some of them unmeasurable, and `materialise` says
+    so one case at a time, deep in a run, in terms that sound like a bug in the
+    case rather than a hole in the data.
+    """
+    by_system: dict[int, list[Any]] = {}
+    for case in cases:
+        by_system.setdefault(case.system_id, []).append(case)
+
+    for system_id, group in sorted(by_system.items()):
+        frame = load_plant(system_id, DATA_DIR).frame
+        first, last = frame.index.min(), frame.index.max()
+        outside = [
+            c
+            for c in group
+            if pd.Timestamp(c.start, tz="UTC") < first
+            or pd.Timestamp(c.end, tz="UTC") > last
+        ]
+        if not outside:
+            continue
+        names = ", ".join(sorted(c.id for c in outside)[:6])
+        more = f" (+{len(outside) - 6} more)" if len(outside) > 6 else ""
+        raise RecordTooShort(
+            f"system {system_id}: the ingested record covers "
+            f"{first.date()} .. {last.date()}, but {len(outside)} of "
+            f"{len(group)} cases need data outside it — {names}{more}.\n"
+            "  This usually means the download was cut short by a network "
+            "failure. Re-run:\n"
+            f"    python -m src.data.cli ingest --system {system_id} "
+            "--years 2016 2017\n"
+            "  It is idempotent, and it now refuses to write a record short "
+            "by fetch failure rather than reporting success."
+        )
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
     paths = {
         "tuning": GOLDEN_DIR / "cases_tuning.jsonl",
@@ -362,7 +419,11 @@ def _cmd_run(args: argparse.Namespace) -> int:
         cases.extend(load_cases(paths[split]))
 
     try:
+        _check_the_record_covers_every_case(cases)
         scores, predictions = _run_engine(args.engine, cases, args)
+    except (RecordTooShort, FileNotFoundError) as exc:
+        print(f"\n{exc}")
+        return 1
     except RuntimeError as exc:
         print(exc)
         return 1

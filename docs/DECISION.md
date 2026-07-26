@@ -1096,3 +1096,86 @@ directory, no API key, no packages except what the lockfile names — on both
 ends of the `requires-python` range. All three bugs above would have been
 caught by its first run, in minutes, instead of one at a time by a person on a
 laptop.
+
+---
+
+## 0043 — A fetch failure is not an archive gap (2026-07-26)
+
+**How it surfaced.** A second machine's ingest produced 58,752 rows ending
+2017-09-04. The development machine's had 70,176 ending 2018-01-01. Same
+command, same system, same years. The short record then crashed the rules
+engine inside `weather_context` with a pydantic ValidationError — an error
+about NaN, thirty cases into an evaluation, with nothing pointing at the
+dataset.
+
+**The root cause.** `_read_day` caught `HTTPError`, `URLError` and
+`TimeoutError` in one place and returned `None` for all of them. A 404 and a
+dead resolver were recorded identically, as `missing_days`. The machine in
+question had been failing DNS lookups minutes earlier. Roughly four months of
+days silently failed to fetch, were logged as holes in the archive, and the
+command printed a success summary.
+
+These are not the same fact:
+
+- **404** — the archive does not have that day. A property of the dataset,
+  identical for everyone, and legitimately drawn in the gap calendar.
+- **network failure** — we could not ask. A property of one download attempt on
+  one machine. Nothing was learned about that day at all.
+
+**Decision.**
+
+- `_read_day` returns a status: `ok`, `gap`, or `failed`. 404 is a gap and is
+  not retried, because a day the archive lacks will not appear on a second
+  request. Everything else — DNS, timeout, connection reset, 5xx — is retried
+  three times with 1/2/4s backoff and then reported as `failed`.
+- `ingest_system` **refuses to write anything** if any day failed, unless
+  `--allow-partial` is passed. A short record is not a smaller version of a
+  complete one: every measurement in this project is relative to a trailing
+  baseline or to the same calendar span in another year, so dropped days do not
+  degrade the evaluation, they silently change what it measures.
+- The check runs *before* the empty-record check. A machine that is simply
+  offline fails every day, and "no PVDAQ data for system 4902" reads as a claim
+  about the archive when the truth is a claim about the network.
+- The manifest records `missing_days` and `fetch_failures` separately. Only the
+  first belongs in a reproducibility record.
+
+**The second bug, found by the first.** `weather_context` computed
+`day_to_day_spread` as `Series.std()`, which uses ddof=1 and returns NaN — not
+an exception — on a single element. Any window holding one day produced a NaN
+ledger value. It had been there since step 5 and was invisible only because the
+development record ran four months longer, so no case window ever landed near
+the end of it.
+
+The fix omits the key rather than raising: the spread is genuinely undefined on
+one day, but the mean insolation and the seasonal comparison are still real, so
+discarding the whole measurement would be its own dishonesty. An absent key
+reads as "not measured"; a zero would read as "perfectly steady", which is the
+opposite of what one day tells you. A caveat says so in words.
+
+A third bug fell out of the same investigation: a record whose irradiance
+channel reads zero throughout divided by a zero seasonal norm in the summary
+string — guarded in the ledger, unguarded in the prose. It now raises
+`ToolError`, because there is no honest statement to make about weather from a
+dead pyranometer.
+
+**The guard.** `tests/test_tool_degenerate_windows.py` runs all eighteen tools
+over six windows a real record can genuinely produce — one day, two intervals,
+the tail of the record, night only, every channel constant, irradiance
+identically zero — and asserts each either returns finite values or raises
+`ToolError`. Never a ValidationError, never a NaN. It reproduced the reported
+bug five ways before the fix and found the divide-by-zero, which nobody had
+reported. The other seventeen tools were already honest.
+
+**And a legibility fix.** With the NaN repaired, a truncated record fails
+differently: `materialise` raises "case G-007: window has no data", one case at
+a time, deep in a run. `eval.runner` now checks every case window against the
+record before the first case and reports the whole set at once — which cases,
+what the record actually covers, and the command to fix it.
+
+**The pattern across 0040–0043.** Four bugs, all invisible on the machine that
+wrote the code, all found by a second machine: uncommitted source, tests
+reading gitignored data, an undeclared dependency, and a silently truncated
+download. Each was a case of local state standing in for the repository. CI
+covers the first three. This one it cannot — a network failure is not
+reproducible on demand — so the defence is that the ingest now refuses to
+produce the bad state at all.

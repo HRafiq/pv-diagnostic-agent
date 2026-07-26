@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import time
 import urllib.error
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
@@ -75,17 +76,59 @@ class IngestResult:
     end: str
     timezone: TimezoneFinding
     resolution: ChannelResolution
+    # Days the archive does not have (404s) versus days we failed to fetch.
+    # Kept apart all the way to the caller so the CLI can report them as the
+    # different things they are.
+    missing_days: int = 0
+    fetch_failures: int = 0
 
 
-def _read_day(system_id: int, day: date) -> tuple[date, bytes | None]:
-    try:
-        return day, fetch_bytes(day_key(system_id, day))
-    except urllib.error.HTTPError:
-        # Genuine gaps are normal in a decade-long archive; a missing day is
-        # data, not an error. It shows up in the quality panel's gap calendar.
-        return day, None
-    except (urllib.error.URLError, TimeoutError):
-        return day, None
+class PartialDownload(RuntimeError):
+    """Some days could not be fetched, so the record on disk is incomplete."""
+
+
+# How many times a network failure is retried before the day is given up on.
+# Backoff is 1s, 2s, 4s — enough to ride out a flapping resolver, short enough
+# that a genuinely offline machine fails in about a minute rather than an hour.
+_FETCH_RETRIES = 3
+
+
+def _read_day(system_id: int, day: date) -> tuple[date, bytes | None, str]:
+    """Fetch one system-day.
+
+    Returns the payload and a status, and the distinction between the two
+    failure statuses is the whole point of this function:
+
+    - ``gap``: the archive returned 404. The day genuinely does not exist
+      upstream. That *is* data — a decade-long archive has holes, and they show
+      up in the quality panel's gap calendar.
+    - ``failed``: we could not ask. DNS died, the connection dropped, the
+      request timed out, the server returned 5xx. Nothing was learned about
+      whether the day exists.
+
+    Conflating them is how a partial download comes to look like a complete
+    one. It happened: a flaky resolver during an ingest silently truncated four
+    months off the end of a record, the command reported success, and the
+    missing months only surfaced as an unrelated crash deep inside an
+    evaluation run.
+    """
+    last: Exception | None = None
+    for attempt in range(_FETCH_RETRIES):
+        try:
+            return day, fetch_bytes(day_key(system_id, day)), "ok"
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                return day, None, "gap"
+            # 5xx and rate limits are transient; retry them like any other
+            # network failure rather than recording a hole in the archive.
+            last = exc
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            last = exc
+        if attempt < _FETCH_RETRIES - 1:
+            time.sleep(2.0**attempt)
+
+    del last  # the aggregate report names the days; per-day tracebacks would flood
+    return day, None, "failed"
 
 
 def detect_utc_offset(
@@ -195,8 +238,14 @@ def ingest_system(
     interval_minutes: int = 15,
     max_workers: int = 8,
     probe_days: int = 20,
+    allow_partial: bool = False,
 ) -> IngestResult:
-    """Download, resolve, normalise and persist one system's data."""
+    """Download, resolve, normalise and persist one system's data.
+
+    Raises `PartialDownload` if any day could not be fetched, unless
+    `allow_partial` is set. See `_read_day` for why a fetch failure and an
+    archive gap are not the same thing.
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
     days = [
         day
@@ -207,9 +256,15 @@ def ingest_system(
     raw_frames: list[pd.DataFrame] = []
     checksums: dict[str, str] = {}
     missing: list[str] = []
+    failed: list[str] = []
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        for day, payload in pool.map(lambda d: _read_day(meta.system_id, d), days):
+        for day, payload, status in pool.map(
+            lambda d: _read_day(meta.system_id, d), days
+        ):
+            if status == "failed":
+                failed.append(day.isoformat())
+                continue
             if payload is None:
                 missing.append(day.isoformat())
                 continue
@@ -218,6 +273,28 @@ def ingest_system(
             frame = frame.rename(columns={"measured_on": "timestamp"})
             frame["timestamp"] = pd.to_datetime(frame["timestamp"], errors="coerce")
             raw_frames.append(frame.dropna(subset=["timestamp"]))
+
+    # Checked before the empty-record case on purpose. A machine that is simply
+    # offline fails every day, and "no PVDAQ data for system 4902 in [2016]"
+    # reads as a claim about the archive when the truth is a claim about the
+    # network.
+    #
+    # A short record is not a smaller version of a complete one. Every deficit
+    # this project measures is relative to a trailing baseline or to the same
+    # calendar span in another year, so silently dropped days do not degrade
+    # the evaluation — they change what it is measuring, invisibly. Refusing to
+    # write the parquet is the only way the next command cannot inherit it.
+    if failed and not allow_partial:
+        raise PartialDownload(
+            f"{len(failed)} of {len(days)} days could not be fetched after "
+            f"{_FETCH_RETRIES} attempts each ({failed[0]} .. {failed[-1]}). "
+            "This is a network failure, not a gap in the archive, and the "
+            "record would be incomplete in a way nothing downstream can see. "
+            "Check your connection and run the same command again — it is "
+            "idempotent. To store the partial record anyway, pass "
+            "--allow-partial, and expect every trailing-baseline and "
+            "same-span-last-year measurement to be affected."
+        )
 
     if not raw_frames:
         raise RuntimeError(
@@ -262,7 +339,13 @@ def ingest_system(
         "timezone": asdict(timezone),
         "channel_resolution": resolution.to_dict(),
         "system_metadata": {k: v for k, v in asdict(meta).items() if k != "raw"},
+        # Two different facts, deliberately not merged. `missing_days` are
+        # 404s: the archive has no such day, and that is a property of the
+        # dataset. `fetch_failures` are days we could not ask about, and that
+        # is a property of one download attempt on one machine. Only the first
+        # belongs in a reproducibility record.
         "missing_days": missing,
+        "fetch_failures": failed,
         "source_bucket": "s3://oedi-data-lake/pvdaq/csv/pvdata/",
         "sha256_by_day": checksums,
     }
@@ -278,6 +361,8 @@ def ingest_system(
         end=str(shifted.index.max()),
         timezone=timezone,
         resolution=resolution,
+        missing_days=len(missing),
+        fetch_failures=len(failed),
     )
 
 

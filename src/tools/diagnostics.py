@@ -409,7 +409,33 @@ def weather_context(ctx: ToolContext, args: WindowArgs) -> ToolResult:
             "other years, which is a thin sample for a claim about weather"
         )
 
+    # A norm of zero cannot be divided by, and no guard on the ledger helps:
+    # the summary string does the same division. Physically this is a record
+    # whose irradiance channel reads zero throughout — a dead pyranometer, not
+    # weather — and there is no honest statement to make about the weather.
+    if seasonal_mean <= 0.0:
+        raise ToolError(
+            "the seasonal insolation norm for this span is zero, so this "
+            "window cannot be expressed relative to it; the irradiance channel "
+            "is likely dead rather than the sky dark"
+        )
+
     dim_days = int((window_daily < 0.6 * seasonal_mean).sum())
+
+    # `Series.std()` uses ddof=1, so one day yields NaN rather than raising.
+    # The day-to-day spread is genuinely undefined on a single day — there is
+    # no day-over-day to measure — but every other figure here is still real,
+    # so the key is omitted rather than the whole measurement discarded. An
+    # absent key reads as "not measured"; a zero would read as "perfectly
+    # steady", which is the opposite of what one day tells you.
+    spread = float(window_daily.std()) if len(window_daily) > 1 else None
+    if spread is None:
+        caveats_extra = [
+            f"the window holds {len(window_daily)} day(s), so there is no "
+            "day-to-day spread to report"
+        ]
+    else:
+        caveats_extra = []
 
     return ToolResult(
         tool="weather_context",
@@ -430,7 +456,7 @@ def weather_context(ctx: ToolContext, args: WindowArgs) -> ToolResult:
             "days_in_window": float(len(window_daily)),
             "brightest_day_kwh_m2": float(window_daily.max()),
             "dimmest_day_kwh_m2": float(window_daily.min()),
-            "day_to_day_spread": float(window_daily.std()),
+            **({"day_to_day_spread": spread} if spread is not None else {}),
             "dim_day_threshold_pct_of_norm": 60.0,
             "seasonal_days_compared": float(max(len(daily) - len(window_daily), 0)),
         },
@@ -439,6 +465,7 @@ def weather_context(ctx: ToolContext, args: WindowArgs) -> ToolResult:
         samples_used=len(window),
         caveats=[
             caveat,
+            *caveats_extra,
             "dim weather explains low energy, never a low performance ratio; if "
             "both are down, the weather is not the whole story",
         ],

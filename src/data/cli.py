@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 from src.config import REPO_ROOT
-from src.data.ingest import ingest_system, load_dataset
+from src.data.ingest import PartialDownload, ingest_system, load_dataset
 from src.data.sources import fetch_system_metadata
 
 
@@ -25,6 +25,15 @@ def main(argv: list[str] | None = None) -> int:
     p_ingest.add_argument("--interval", type=int, default=15, help="minutes")
     p_ingest.add_argument("--workers", type=int, default=8)
     p_ingest.add_argument("--out", type=Path, default=REPO_ROOT / "data" / "raw")
+    p_ingest.add_argument(
+        "--allow-partial",
+        action="store_true",
+        help=(
+            "Write the record even if some days could not be fetched. Off by "
+            "default: a silently short record changes what every trailing "
+            "baseline measures."
+        ),
+    )
     p_ingest.set_defaults(func=_cmd_ingest)
 
     p_desc = sub.add_parser("describe", help="Summarise an ingested system.")
@@ -46,17 +55,35 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
     )
     print(f"  downloading {len(args.years)} year(s): {args.years}")
 
-    result = ingest_system(
-        meta,
-        years=args.years,
-        out_dir=args.out,
-        interval_minutes=args.interval,
-        max_workers=args.workers,
-    )
+    try:
+        result = ingest_system(
+            meta,
+            years=args.years,
+            out_dir=args.out,
+            interval_minutes=args.interval,
+            max_workers=args.workers,
+            allow_partial=args.allow_partial,
+        )
+    except PartialDownload as exc:
+        # Nothing was written. Saying so matters: the natural assumption on
+        # seeing an error is that a half-finished file is sitting on disk.
+        print(f"\n  download incomplete — nothing written\n\n  {exc}", file=sys.stderr)
+        return 1
 
     tz = result.timezone
     print(f"\n  rows       {result.rows:,} at {result.interval_minutes} min")
     print(f"  range      {result.start} .. {result.end}")
+    if result.missing_days:
+        print(f"  gaps       {result.missing_days} day(s) absent from the archive")
+    if result.fetch_failures:
+        # Only reachable under --allow-partial; otherwise the ingest raised.
+        print(
+            f"  INCOMPLETE {result.fetch_failures} day(s) could not be fetched. "
+            "This record is short by network failure, not by archive gap. "
+            "Every trailing-baseline and same-span-last-year measurement over "
+            "the affected span is unreliable; re-run without --allow-partial "
+            "once the connection is stable."
+        )
     print(
         f"  timezone   UTC{tz.offset_hours:+g} from "
         f"{tz.samples_used:,} clear-day samples, r={tz.correlation:.4f} "
