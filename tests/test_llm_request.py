@@ -607,3 +607,61 @@ def test_every_node_has_room_for_its_reply(
         f"{profile}:{node} caps output at {cfg.max_tokens}, below the "
         f"{floors[node]} this node needs for thinking plus a full reply"
     )
+
+
+# ---------------------------------------------------------------------------
+# The cause vocabulary
+# ---------------------------------------------------------------------------
+# `CaseScore.cause_correct` is exact string equality against a canonical token.
+# `cause` was free text, so the model used it both ways — `shading` on one
+# case, "A low-angle morning obstruction (trees, structure, or an adjacent row)
+# is shading strings 1, 2 and…" on the next. The prose form scored zero however
+# right it was, while the rules engine — which picks from a fixed vocabulary —
+# scored normally. The rules-vs-agent comparison was being decided by
+# formatting.
+def test_the_cause_field_is_a_label_not_an_explanation() -> None:
+    from src.agent.nodes.synthesizer import SYNTHESIS_SCHEMA
+
+    cause = SYNTHESIS_SCHEMA["properties"]["cause"]
+    assert "enum" in cause, "free-text cause cannot be compared against ground truth"
+    assert "" in cause["enum"], "an unsettled finding needs an empty cause"
+
+
+def test_every_golden_cause_is_in_the_vocabulary() -> None:
+    """If ground truth names a cause the agent cannot emit, that case is
+    unwinnable by construction."""
+    import json
+    from pathlib import Path
+
+    from src.agent.nodes.synthesizer import CAUSE_VOCABULARY
+
+    truths: set[str] = set()
+    for name in ("cases_tuning.jsonl", "cases_heldback.jsonl"):
+        path = Path("eval/golden") / name
+        if not path.exists():
+            pytest.skip("golden set not built")
+        for line in path.read_text().splitlines():
+            cause = json.loads(line).get("expected_cause")
+            if cause:
+                truths.add(cause)
+
+    missing = sorted(truths - set(CAUSE_VOCABULARY))
+    assert not missing, (
+        f"ground truth names causes the agent has no way to say: {missing}"
+    )
+
+
+def test_the_vocabulary_comes_from_the_knowledge_base() -> None:
+    """Restating it here would let the two drift apart silently."""
+    from src.agent.nodes.synthesizer import CAUSE_VOCABULARY
+    from src.knowledge import load_knowledge
+
+    assert set(CAUSE_VOCABULARY) == set(load_knowledge().signatures)
+
+
+def test_the_explanation_still_has_somewhere_to_live() -> None:
+    """Constraining `cause` must not remove the agent's ability to explain."""
+    from src.agent.nodes.synthesizer import SYNTHESIS_SCHEMA
+
+    for field in ("answer", "summary", "title"):
+        assert "enum" not in SYNTHESIS_SCHEMA["properties"][field]

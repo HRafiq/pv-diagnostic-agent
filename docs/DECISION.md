@@ -1512,3 +1512,79 @@ separate `string_outage` from `shading`, settled, was sent back by the critic,
 and re-planned with three narrower causes. That is differential diagnosis, and
 it is the first direct evidence the design works. None of it was scoreable yet,
 because every case died before the answer was filed.
+
+---
+
+## 0052 — The critic could not accept (2026-07-26)
+
+**The evidence.** The first four scored cases produced **ten reviews and zero
+accepts**. Every case ran to the four-cycle cap. Ground truth against what the
+agent said in its *first* cycle:
+
+| case | truth | cycle-1 answer | final | outcome |
+|---|---|---|---|---|
+| G-001 | fault / string_outage | correct | not enough evidence | **right turned into wrong** |
+| G-002 | fault / string_outage | correct | correct | 3× the cost, nothing changed |
+| G-003 | fault / shading | correct (`shading`) | correct | 3× the cost, nothing changed |
+| G-004 | recoverable / soiling | wrong | moved to soiling | **the critic helped** |
+
+The critic is not the villain — on G-004 it pushed a wrong string-fault answer
+onto the right soiling answer, which is exactly its job. The defect is that it
+could not *stop*.
+
+**The cause.** `accept` was gated on the intersection of look-alikes *measured*
+and look-alikes the critic *named*, in two places: the verdict override in
+`review()`, and `CriticVerdict`'s own validator. A reviewer looking at a string
+fault names the three or four look-alikes that bear on it; it does not recite
+all seven. One unnamed item forced `send_back` however good the answer was.
+
+`test_accept_survives_a_clean_answer` never caught it because the fixture
+defaults `lookalikes_considered` to the entire checklist — it recited all seven
+on every call, which is precisely what a real critic does not do.
+
+**Decision.** The critic's list is ignored entirely; the verdict is gated on
+what the tool registry says was measured. The reasoning that justified the
+intersection — "a model will happily say all seven" — is correct and led to the
+wrong conclusion: **a claim nobody can verify carries no information, so
+intersecting with it cannot remove a false positive, only a true one.** The
+measurement is the fact, computed from `spec.discriminates`, and it cannot be
+inflated by anything the model says. The guarantee is unchanged.
+
+Checked against the observed traces: G-001 cycle 1 measured 7/7 (its correct
+answer would now be accepted); G-002 measured 7/7 (two cycles and ~$0.85
+saved); **G-003 cycle 1 measured only 5/7** — missing curtailment and seasonal
+derating, which it went on to measure in cycle 2. That send-back was
+legitimate, and it still happens. The critic keeps its teeth.
+
+## 0053 — A cycle that measures nothing cannot change the evidence (2026-07-26)
+
+G-001 spent cycles 3 and 4 on `plan -> look up -> answer` with no measurement
+between them — roughly five minutes and half the case's budget re-reading the
+same ledger and being rejected for the same reasons. The critic was right each
+time; the loop was wrong to ask again.
+
+Both loops now end the investigation when a review cycle took no measurement,
+and say so in `stopped_because`. A cycle that *did* measure still replans — a
+test pins that, because a guard that turned every `send_back` into a stop would
+remove the critic's only means of correcting an answer, which is what rescued
+G-004.
+
+## 0054 — `cause` is a label; the explanation goes in `answer` (2026-07-26)
+
+`CaseScore.cause_correct` is exact string equality against a canonical token
+(`string_outage`). The synthesis schema left `cause` as free text, so the model
+used the field both ways — `shading` on one case, *"A low-angle morning
+obstruction (trees, structure, or an adjacent row) is shading strings 1, 2
+and…"* on the next. The first scores; the second scores zero however right it
+is.
+
+The rules engine picks from a fixed vocabulary, so it was unaffected. **The
+rules-vs-agent comparison was being decided by formatting** — which would have
+been published as a finding about reasoning.
+
+`cause` is now an enum, read from the knowledge base's signature names rather
+than restated, so the vocabulary cannot drift from the signatures the agent is
+shown. A test asserts every `expected_cause` in the golden set is in it: ground
+truth naming a cause the agent has no way to say is a case that cannot be won.
+`answer`, `summary` and `title` stay free text — the explanation was never the
+problem, the label doing two jobs was.

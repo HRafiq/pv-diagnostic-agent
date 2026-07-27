@@ -496,6 +496,20 @@ def investigate(
             if verdict.verdict in ("accept", "not_enough_evidence"):
                 break
 
+            # A send_back is only worth acting on if the next cycle could
+            # produce different evidence. When the cycle just finished took no
+            # measurement at all, it could not — the synthesiser would be asked
+            # to re-read the same ledger and would reach the same conclusion,
+            # and the critic would reject it again. One real case spent two
+            # such cycles, roughly five minutes and half its budget, on
+            # `plan -> look up -> answer` with nothing measured in between.
+            if measurements_this_cycle == 0 and out.results:
+                out.stopped_because = (
+                    "a review cycle produced no new measurement, so another "
+                    "one could not change the evidence"
+                )
+                break
+
             state.cycle += 1
             revision_request = verdict.revision_request
             if state.cap_reached:

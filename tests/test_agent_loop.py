@@ -1161,3 +1161,66 @@ def test_a_genuinely_wrong_argument_still_fails_loudly() -> None:
             context_for(synthetic_frame()),
             {"start": "2017-05-16", "not_a_real_argument": 1},
         )
+
+
+def test_a_review_cycle_that_measures_nothing_ends_the_investigation(
+    ctx: ToolContext, clock: FrozenClock
+) -> None:
+    """A replan with no new measurement cannot produce different evidence.
+
+    One real case spent two such cycles — `plan -> look up -> answer` with
+    nothing measured in between — roughly five minutes and half its budget,
+    re-reading the same ledger and being rejected for the same reasons each
+    time. The critic was right to reject it; the loop was wrong to ask again.
+    """
+
+    def always_send_back(state: AgentState, results: Any, synthesis: Any) -> Any:
+        return _verdict("send_back", revision_request="look again")
+
+    result = run(
+        plans=[a_plan(["compute_temp_corrected_pr"]), a_plan([])],
+        # Cycle 1 measures, then stops. Cycle 2 stops without measuring.
+        routes=[a_call("compute_temp_corrected_pr"), a_stop(), a_stop()],
+        answers=[a_settled_answer(), a_settled_answer()],
+        ctx=ctx,
+        clock=clock,
+        critic=always_send_back,
+        **WINDOW,
+    )
+
+    assert "no new measurement" in (result.stopped_because or "")
+    assert len([s for s in result.steps if s.kind == "plan"]) == 2, (
+        "it should have replanned once and then stopped, not run to the cap"
+    )
+
+
+def test_a_cycle_that_does_measure_still_replans(
+    ctx: ToolContext, clock: FrozenClock
+) -> None:
+    """The guard must not turn every send_back into a stop — a cycle that
+    gathered new evidence has earned another look."""
+    calls: list[int] = []
+
+    def send_back_once(state: AgentState, results: Any, synthesis: Any) -> Any:
+        calls.append(1)
+        if len(calls) == 1:
+            return _verdict("send_back", revision_request="measure the ceiling")
+        return _verdict("accept", standing=[], checked=list(_ALL_LOOKALIKES))
+
+    result = run(
+        plans=[a_plan(["compute_temp_corrected_pr"]), a_plan(["check_ac_ceiling"])],
+        routes=[
+            a_call("compute_temp_corrected_pr"),
+            a_stop(),
+            a_call("check_ac_ceiling"),
+            a_stop(),
+        ],
+        answers=[a_settled_answer(), a_settled_answer()],
+        ctx=ctx,
+        clock=clock,
+        critic=send_back_once,
+        **WINDOW,
+    )
+
+    assert len([s for s in result.steps if s.kind == "plan"]) == 2
+    assert "no new measurement" not in (result.stopped_because or "")

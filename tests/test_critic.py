@@ -394,3 +394,88 @@ def test_the_configured_cap_is_four() -> None:
     from src.config import load_models_config
 
     assert load_models_config().limits.max_planner_critic_cycles == 4
+
+
+# ===========================================================================
+# `accept` must be reachable
+# ===========================================================================
+# The first scored run produced ten reviews and zero accepts. Every case ran to
+# the cycle cap, and on one a correct answer was rejected into a wrong "not
+# enough evidence".
+#
+# The cause was that the verdict was gated on the *intersection* of look-alikes
+# measured and look-alikes the critic named — so a reviewer that named the
+# three relevant to a string fault, rather than reciting all seven, forced
+# send_back however good the answer was.
+#
+# `test_accept_survives_a_clean_answer` above did not catch it because
+# `a_verdict()` defaults `lookalikes_considered` to the whole checklist. The
+# fixture recited all seven every time, which is precisely what a real critic
+# does not do.
+def test_accept_survives_a_critic_that_named_only_the_relevant_lookalikes() -> None:
+    """The verdict is gated on what was measured, not on what was recited."""
+    client = ScriptedClient(
+        replies={
+            "critic": [
+                a_verdict(lookalikes_considered=["weather", "sensor_drift", "clipping"])
+            ]
+        }
+    )
+    verdict = review(
+        client,
+        a_state([*ALL_TOOLS, "detect_stuck_channels"]),
+        "brief",
+        [a_result("compute_temp_corrected_pr", pr=0.8)],
+        [],
+        a_synthesis(),
+    ).verdict
+    assert verdict.verdict == "accept"
+
+
+def test_accept_is_still_refused_when_a_lookalike_was_never_measured() -> None:
+    """Loosening the recitation requirement must not loosen the measuring one.
+
+    This is the guarantee the checklist is actually for: a tool that
+    discriminates each look-alike must have run.
+    """
+    client = ScriptedClient(replies={"critic": [a_verdict()]})
+    verdict = review(
+        client,
+        a_state(["compute_temp_corrected_pr"]),
+        "brief",
+        [a_result("compute_temp_corrected_pr", pr=0.8)],
+        [],
+        a_synthesis(),
+    ).verdict
+    assert verdict.verdict == "send_back"
+    assert verdict.unchecked_lookalikes
+
+
+def test_the_checklist_credits_nothing_the_model_merely_claimed() -> None:
+    """The guarantee is unchanged: a tool that discriminates it must have run.
+
+    What changed is that the critic's own list is ignored rather than
+    intersected — an unverifiable claim can only delete true positives, never
+    catch a false one.
+    """
+    from src.agent.nodes.critic import lookalikes_measured
+
+    one_tool = lookalikes_measured(["compute_temp_corrected_pr"])
+    assert set(one_tool) < set(LOOKALIKE_CHECKLIST), (
+        "one tool must not satisfy the whole checklist"
+    )
+
+    client = ScriptedClient(
+        replies={"critic": [a_verdict(lookalikes_considered=list(LOOKALIKE_CHECKLIST))]}
+    )
+    verdict = review(
+        client,
+        a_state(["compute_temp_corrected_pr"]),
+        "brief",
+        [a_result("compute_temp_corrected_pr", pr=0.8)],
+        [],
+        a_synthesis(),
+    ).verdict
+    assert set(verdict.lookalikes_checked) == set(one_tool), (
+        "the verdict credited a look-alike the run never measured"
+    )

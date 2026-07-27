@@ -42,7 +42,12 @@ from src.agent.nodes.synthesizer import Synthesis, ledger_of
 from src.agent.state import LOOKALIKE_CHECKLIST, AgentState, CriticVerdict
 from src.tools import REGISTRY, ToolResult
 
-__all__ = ["CRITIC_SCHEMA", "Review", "lookalikes_actually_checked", "review"]
+__all__ = [
+    "CRITIC_SCHEMA",
+    "Review",
+    "lookalikes_measured",
+    "review",
+]
 
 
 CRITIC_SCHEMA: dict[str, Any] = {
@@ -110,6 +115,32 @@ CRITIC_SCHEMA: dict[str, Any] = {
         },
     },
 }
+
+
+def lookalikes_measured(tools_called: list[str]) -> list[str]:
+    """Look-alikes some tool that discriminates them actually measured.
+
+    Derived from the tool registry, so it cannot be inflated by anything the
+    model says — which is the whole guarantee the checklist is for.
+
+    This used to be intersected with the look-alikes the critic *named*, on the
+    reasoning that a model will happily claim all seven. That reasoning is
+    right and the conclusion was wrong: a claim nobody can verify carries no
+    information, so intersecting with it cannot remove a false positive — only
+    a true one. It did, constantly. A reviewer looking at a string fault names
+    the three look-alikes that bear on it, so one unnamed item made `accept`
+    unreachable: ten reviews across the first four scored cases, zero accepts,
+    every case to the cycle cap, and one correct answer rejected into a wrong
+    abstention.
+
+    The measurement is the fact. The claim is now ignored entirely.
+    """
+    measured: set[str] = set()
+    for name in tools_called:
+        spec = REGISTRY.get(name)
+        if spec is not None:
+            measured |= set(spec.discriminates)
+    return [item for item in LOOKALIKE_CHECKLIST if item in measured]
 
 
 def lookalikes_actually_checked(
@@ -212,10 +243,9 @@ def review(
     if synthesis.build_error:
         unsupported.append(synthesis.build_error)
 
-    checked = lookalikes_actually_checked(
-        list(state.tools_called),
-        [str(x) for x in payload.get("lookalikes_considered", [])],
-    )
+    # What the run measured, regardless of what the critic thought to mention.
+    # See `lookalikes_measured` for why the critic's own list is not consulted.
+    measured = lookalikes_measured(list(state.tools_called))
 
     still_standing = [str(x) for x in payload.get("hypotheses_still_standing", [])]
     wanted = str(payload.get("verdict", "send_back"))
@@ -223,10 +253,10 @@ def review(
 
     # --- the verdict, tightened but never loosened -------------------------
     verdict = wanted
-    if wanted == "accept" and (unsupported or set(LOOKALIKE_CHECKLIST) - set(checked)):
+    unmeasured = sorted(set(LOOKALIKE_CHECKLIST) - set(measured))
+    if wanted == "accept" and (unsupported or unmeasured):
         verdict = "send_back"
-        missing = sorted(set(LOOKALIKE_CHECKLIST) - set(checked))
-        request = request or _repair_request(unsupported, missing)
+        request = request or _repair_request(unsupported, unmeasured)
     if wanted == "not_enough_evidence" and len(still_standing) < 2:
         # Declining to commit needs two survivors. With fewer, the answer is
         # either settled or the review itself is incoherent; another cycle is
@@ -263,7 +293,7 @@ def review(
             hypotheses_excluded=excluded,
             hypotheses_still_standing=still_standing,
             unsupported_claims=unsupported,
-            lookalikes_checked=checked,
+            lookalikes_checked=measured,
             verdict=verdict,
             revision_request=request if verdict == "send_back" else None,
         )
@@ -275,7 +305,7 @@ def review(
             hypotheses_considered=[h.id for h in state.hypotheses],
             hypotheses_still_standing=[h.id for h in state.still_standing],
             unsupported_claims=unsupported,
-            lookalikes_checked=checked,
+            lookalikes_checked=measured,
             verdict="send_back",
             revision_request=(
                 "the review could not be recorded in a usable form "

@@ -35,6 +35,32 @@ __all__ = ["SYNTHESIS_SCHEMA", "Synthesis", "ledger_of", "synthesize"]
 _CATEGORIES = ["fault", "recoverable", "by_design", "not_the_plant"]
 
 
+def _cause_vocabulary() -> list[str]:
+    """The canonical cause names, read from the knowledge base.
+
+    `cause` is a *label*, not an explanation. It was free text, and the model
+    used it both ways — `shading` on one case, "A low-angle morning obstruction
+    (trees, structure, or an adjacent row) is shading strings 1, 2 and…" on the
+    next. Scoring compares it by exact equality against a canonical token
+    (`eval/metrics.py`), so the prose form scored zero however right it was,
+    while the rules engine — which picks from a fixed vocabulary — scored
+    normally. The comparison between the two was decided by formatting.
+
+    The explanation still has somewhere to live: `answer` and `summary` are
+    free text and are where the reasoning belongs. This field says *which*
+    cause, in the same words for both engines.
+
+    Read from the knowledge base rather than restated here so the vocabulary
+    cannot drift from the signatures the agent is shown.
+    """
+    from src.knowledge import load_knowledge
+
+    return sorted(load_knowledge().signatures)
+
+
+CAUSE_VOCABULARY = _cause_vocabulary()
+
+
 SYNTHESIS_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
@@ -62,7 +88,14 @@ SYNTHESIS_SCHEMA: dict[str, Any] = {
             "enum": [*_CATEGORIES, ""],
             "description": "Empty string when not settled.",
         },
-        "cause": {"type": "string", "description": "Empty string when not settled."},
+        "cause": {
+            "type": "string",
+            "enum": [*CAUSE_VOCABULARY, ""],
+            "description": (
+                "Which cause, as one of the listed names. Empty string when not "
+                "settled. The explanation goes in `answer`, not here."
+            ),
+        },
         "confidence": {
             "type": "number",
             "minimum": 0.0,
@@ -77,7 +110,7 @@ SYNTHESIS_SCHEMA: dict[str, Any] = {
                 "additionalProperties": False,
                 "required": ["cause", "consequence_if_true"],
                 "properties": {
-                    "cause": {"type": "string"},
+                    "cause": {"type": "string", "enum": CAUSE_VOCABULARY},
                     "consequence_if_true": {
                         "type": "string",
                         "description": (

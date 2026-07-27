@@ -426,6 +426,15 @@ def build_graph(run: _Run) -> Any:
         verdict = state.verdicts[-1]
         if verdict.verdict in ("accept", "not_enough_evidence"):
             return "done"
+        # Same guard as the plain loop: a cycle that measured nothing cannot
+        # produce different evidence next time round, so replanning is a
+        # guaranteed-identical answer at full price.
+        if run.measurements_this_cycle == 0 and run.out.results:
+            run.out.stopped_because = (
+                "a review cycle produced no new measurement, so another one "
+                "could not change the evidence"
+            )
+            return "done"
         if state.cap_reached:
             run.out.stopped_because = (
                 f"reached the {state.max_cycles}-cycle review cap without an "
