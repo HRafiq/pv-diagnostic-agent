@@ -26,7 +26,12 @@ dependencies = [
     "pyarrow==19.0.1",
 
     # --- agent --------------------------------------------------------------
-    "anthropic==0.62.0",
+    # >= 0.77.0 is a hard floor, not a preference: `output_config`
+    # (which carries both `effort` and the structured-output `format`)
+    # did not exist on messages.create before it, and every agent call
+    # sends it. tests/test_llm_request.py pins that the installed SDK
+    # accepts what src/agent/llm.py builds.
+    "anthropic==0.120.0",
     # LangGraph is the step 12 port, kept as a core dependency so the
     # equivalence test runs in CI rather than being skipped.
     "langgraph==0.6.7",

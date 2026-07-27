@@ -35,6 +35,7 @@ __all__ = [
     "LLMClient",
     "LLMResponse",
     "ScriptedClient",
+    "request_kwargs",
 ]
 
 
@@ -81,6 +82,48 @@ class LLMClient(Protocol):
                 flow uses one; free prose can never decide what happens next.
         """
         ...
+
+
+# ---------------------------------------------------------------------------
+# Request construction
+# ---------------------------------------------------------------------------
+def request_kwargs(
+    cfg: ModelConfig,
+    system: str,
+    user: str,
+    schema: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build the `messages.create(...)` payload for one node.
+
+    Split out of `AnthropicClient.complete` so it can be checked against the
+    pinned SDK without a network call or an API key. That check is the whole
+    reason this is a separate function: the parameters below are current-API,
+    but a pinned SDK that predates them raises `TypeError: got an unexpected
+    keyword argument` at the *first real call* — which, on a project whose
+    evaluation had never been run with a key, meant the error waited months.
+
+    `effort` and `format` both live inside `output_config`; neither is a
+    top-level parameter. `temperature`, `top_p` and `top_k` are deliberately
+    absent — they were removed on the models this project uses and return 400.
+    """
+    kwargs: dict[str, Any] = {
+        "model": cfg.model,
+        "max_tokens": cfg.max_tokens,
+        "system": system,
+        "messages": [{"role": "user", "content": user}],
+    }
+    output_config: dict[str, Any] = {}
+    if cfg.effort:
+        output_config["effort"] = cfg.effort
+    if schema is not None:
+        output_config["format"] = {"type": "json_schema", "schema": schema}
+    if output_config:
+        kwargs["output_config"] = output_config
+    if cfg.thinking == "adaptive":
+        kwargs["thinking"] = {"type": "adaptive"}
+    elif cfg.thinking == "disabled":
+        kwargs["thinking"] = {"type": "disabled"}
+    return kwargs
 
 
 # ---------------------------------------------------------------------------
@@ -132,24 +175,7 @@ class AnthropicClient:
     ) -> LLMResponse:
         self._check_budget()
         cfg = self._config(node)
-
-        kwargs: dict[str, Any] = {
-            "model": cfg.model,
-            "max_tokens": cfg.max_tokens,
-            "system": system,
-            "messages": [{"role": "user", "content": user}],
-        }
-        output_config: dict[str, Any] = {}
-        if cfg.effort:
-            output_config["effort"] = cfg.effort
-        if schema is not None:
-            output_config["format"] = {"type": "json_schema", "schema": schema}
-        if output_config:
-            kwargs["output_config"] = output_config
-        if cfg.thinking == "adaptive":
-            kwargs["thinking"] = {"type": "adaptive"}
-        elif cfg.thinking == "disabled":
-            kwargs["thinking"] = {"type": "disabled"}
+        kwargs = request_kwargs(cfg, system, user, schema)
 
         started = time.monotonic()
         message = self._client.messages.create(**kwargs)

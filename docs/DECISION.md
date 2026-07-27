@@ -1179,3 +1179,62 @@ download. Each was a case of local state standing in for the repository. CI
 covers the first three. This one it cannot — a network failure is not
 reproducible on demand — so the defence is that the ingest now refuses to
 produce the bad state at all.
+
+---
+
+## 0044 — The pinned SDK predated the API the code targets (2026-07-26)
+
+**The bug.** `pyproject.toml` pinned `anthropic==0.62.0`. Every request in
+`src/agent/llm.py` sends `output_config`, which carries both the `effort` level
+and the structured-output `format`. That parameter did not exist on
+`messages.create` until **0.77.0** — fifteen releases later. The first real
+agent run, with an API key finally available, died thirty seconds in on
+`TypeError: Messages.create() got an unexpected keyword argument 'output_config'`.
+
+**Why nothing caught it.** Because nothing had ever called it. The project was
+built without an API key, so the entire LLM path — planner, router,
+synthesiser, critic — had never executed once. `ScriptedClient` covers the
+orchestration with no network and no key, which is the right design and is why
+567 tests could pass over thirteen build steps while the real client was
+unrunnable. A scripted client is the one thing that cannot check whether the
+*real* client's payload is valid.
+
+The request code was never wrong. It was written against the current API, and
+`docs/DECISION.md` 0004 records the reasoning for using `effort` instead of the
+removed `temperature`. The pin was simply frozen at a version that predated the
+API the code correctly targeted, and no test related the two.
+
+**Decision.**
+
+- `anthropic` is pinned to `0.120.0`, with `>= 0.77.0` recorded inline as a
+  hard floor and the reason stated — "pandas needs an engine" (0042) and this
+  are the same failure: a dependency whose necessity is invisible from the
+  import graph.
+- The payload construction moved out of `AnthropicClient.complete` into a pure
+  `request_kwargs(cfg, system, user, schema)`. Not a refactor for its own sake:
+  it is what makes the request checkable without a key, a network call, or a
+  cent of spend.
+- `tests/test_llm_request.py` checks every `(profile, node)` pair in
+  `config/models.yaml` against the installed SDK's own signature and types —
+  every parameter is accepted; `effort` and `format` are nested inside
+  `output_config` rather than top-level; the removed `temperature` / `top_p` /
+  `top_k` are absent; `thinking` is `adaptive` or `disabled` and never carries
+  `budget_tokens`; and the configured effort levels are read from the SDK's
+  `OutputConfigParam` rather than restated, so a level the API adds or drops
+  surfaces on the next bump instead of as a 400.
+
+  Two of the tests guard the guard: one fails if `messages.create` ever grows
+  `**kwargs` (which would make an unknown-parameter check meaningless), and one
+  asserts an obviously-fake parameter name is rejected.
+
+- Verified by reinstalling `0.62.0` and confirming the suite reproduces the
+  reported `TypeError` as a named assertion failure, then restoring the pin.
+
+**The pattern this closes.** 0040 through 0043 were all local state standing in
+for the repository. This one is different and worth separating: it is an
+**untested path**, not an untested environment. CI cannot fix it, because CI
+has no API key either — and it should not have one. The fix had to be a test
+that validates the request *without* making it. Where a path cannot be executed
+in CI, the obligation is to find the part of it that can be checked offline and
+check that, rather than let "no key available" stand in for "no coverage
+possible."
