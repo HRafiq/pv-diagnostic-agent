@@ -7,6 +7,7 @@ and this file is what stops one being printed as though it were.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -198,3 +199,117 @@ def test_the_key_is_checked_before_any_case_is_loaded(
     monkeypatch.setattr(runner, "_load_cases", explode)
 
     assert runner.main(["experiments", "--split", "heldback", "--runs", "1"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# One bad case must not destroy the run
+# ---------------------------------------------------------------------------
+# A 43-case agent evaluation costs real money. When an investigation died —
+# a malformed reply, a transient API error — the exception propagated out of
+# run_agent_engine and every case that had already succeeded was lost along
+# with what it cost. Twice, in practice, before this existed.
+def test_a_failed_case_is_scored_not_fatal(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import eval.runner as runner
+
+    cases = [
+        SimpleNamespace(
+            id=f"G-{n:03d}",
+            system_id=4902,
+            question="why is output low?",
+            start="2017-05-16",
+            end="2017-05-30",
+            split="tuning",
+            is_lookalike=False,
+            truth_settled=True,
+            truth_category="fault",
+            truth_cause="string_fault",
+        )
+        for n in (1, 2, 3)
+    ]
+
+    monkeypatch.setattr(
+        runner,
+        "load_plant",
+        lambda *a, **k: SimpleNamespace(
+            context=lambda *a, **k: object(), meta=SimpleNamespace(name="plant")
+        ),
+    )
+    monkeypatch.setattr(
+        runner, "materialise", lambda *a, **k: SimpleNamespace(full_record=object())
+    )
+    monkeypatch.setattr(runner, "build_client", lambda *a, **k: object())
+    monkeypatch.setattr(
+        runner, "score_case", lambda case, pred: a_score(case.id, False)
+    )
+
+    calls: list[str] = []
+
+    def flaky(question: str, ctx: Any, *a: Any, **kw: Any) -> Any:
+        case_id = kw["investigation_id"].removeprefix("INV-")
+        calls.append(case_id)
+        if case_id == "G-002":
+            raise ValueError("planner returned a reply that breaks its schema")
+        return SimpleNamespace(
+            finding=None,
+            tools_called=["compute_temp_corrected_pr"],
+            unplanned_tools=[],
+            state=SimpleNamespace(cycle=1),
+            cost_usd=0.01,
+            ungrounded_numbers=[],
+        )
+
+    monkeypatch.setattr(runner, "investigate", flaky)
+
+    scores, predictions = runner.run_agent_engine(cases)
+
+    assert calls == ["G-001", "G-002", "G-003"], "the run stopped at the failure"
+    assert len(predictions) == 3, "the failed case must stay in the denominator"
+
+    failed = next(p for p in predictions if p.case_id == "G-002")
+    assert failed.settled is False
+    assert failed.category is None
+    assert failed.tools_called == ()
+
+    out = capsys.readouterr().out
+    assert "G-002  FAILED" in out
+    assert "1 of 3 cases failed outright" in out
+
+
+def test_a_budget_breach_still_stops_the_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """BudgetExceeded means the loop is not terminating — a defect in the
+    agent, not a bad case. Swallowing it would repeat it 43 times."""
+    import eval.runner as runner
+    from src.agent.llm import BudgetExceeded
+
+    case = SimpleNamespace(
+        id="G-001",
+        system_id=4902,
+        question="?",
+        start="2017-05-16",
+        end="2017-05-30",
+        split="tuning",
+    )
+    monkeypatch.setattr(
+        runner,
+        "load_plant",
+        lambda *a, **k: SimpleNamespace(
+            context=lambda *a, **k: object(), meta=SimpleNamespace(name="plant")
+        ),
+    )
+    monkeypatch.setattr(
+        runner, "materialise", lambda *a, **k: SimpleNamespace(full_record=object())
+    )
+    monkeypatch.setattr(runner, "build_client", lambda *a, **k: object())
+    monkeypatch.setattr(
+        runner,
+        "investigate",
+        lambda *a, **k: (_ for _ in ()).throw(
+            BudgetExceeded("investigation hit its 40-call cap")
+        ),
+    )
+
+    with pytest.raises(BudgetExceeded):
+        runner.run_agent_engine([case])

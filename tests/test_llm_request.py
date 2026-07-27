@@ -24,7 +24,11 @@ from typing import Any, get_args, get_origin, get_type_hints
 
 import pytest
 
-from src.agent.llm import request_kwargs
+from src.agent.llm import request_kwargs, sanitize_schema, violations
+from src.agent.nodes.critic import CRITIC_SCHEMA
+from src.agent.nodes.planner import PLAN_SCHEMA
+from src.agent.nodes.router import ROUTE_SCHEMA
+from src.agent.nodes.synthesizer import SYNTHESIS_SCHEMA
 from src.config import ModelConfig, load_models_config
 
 SCHEMA: dict[str, Any] = {
@@ -188,3 +192,127 @@ def test_unused_parameter_names_are_not_silently_accepted() -> None:
     accepted = set(_create_signature().parameters)
     assert "definitely_not_a_real_parameter" not in accepted
     assert get_origin(dict[str, Any]) is dict  # keep the typing import honest
+
+
+# ---------------------------------------------------------------------------
+# Schema validity — the second thing the first real run found
+# ---------------------------------------------------------------------------
+# Structured outputs accept a subset of JSON Schema. `minItems: 2` on the
+# planner's hypotheses list returned:
+#   400 output_config.format.schema: For 'array' type, 'minItems' values other
+#   than 0 or 1 are not supported (got: [2, 5])
+# Same root cause as the stale pin above — a request that had never been made.
+# `sanitize_schema` moves those constraints into the field description and
+# `violations` re-checks them against the reply, so the requirement survives
+# with its enforcement point moved.
+ALL_SCHEMAS: dict[str, dict[str, Any]] = {
+    "planner": PLAN_SCHEMA,
+    "router": ROUTE_SCHEMA,
+    "synthesizer": SYNTHESIS_SCHEMA,
+    "critic": CRITIC_SCHEMA,
+}
+
+# Rejected by the structured-output API. `minItems` is special: 0 and 1 are
+# accepted, anything else is not.
+REJECTED_KEYWORDS = {
+    "maxItems",
+    "minimum",
+    "maximum",
+    "exclusiveMinimum",
+    "exclusiveMaximum",
+    "minLength",
+    "maxLength",
+    "multipleOf",
+    "pattern",
+}
+
+
+def _walk(node: Any, path: str = "") -> list[tuple[str, str, Any]]:
+    """Every (path, keyword, value) pair in a schema."""
+    found: list[tuple[str, str, Any]] = []
+    if isinstance(node, list):
+        for index, item in enumerate(node):
+            found.extend(_walk(item, f"{path}[{index}]"))
+    elif isinstance(node, dict):
+        for key, value in node.items():
+            found.append((path or "(root)", key, value))
+            found.extend(_walk(value, f"{path}.{key}"))
+    return found
+
+
+@pytest.mark.parametrize("name", sorted(ALL_SCHEMAS))
+def test_the_sanitised_schema_carries_nothing_the_api_rejects(name: str) -> None:
+    clean = sanitize_schema(ALL_SCHEMAS[name])
+
+    offences = [
+        f"{path}.{keyword} = {value!r}"
+        for path, keyword, value in _walk(clean)
+        if keyword in REJECTED_KEYWORDS
+        or (keyword == "minItems" and value not in (0, 1))
+    ]
+    assert not offences, (
+        f"the {name} schema still carries constraints structured outputs "
+        f"rejects, so the first call returns a 400: {offences}"
+    )
+
+
+@pytest.mark.parametrize("name", sorted(ALL_SCHEMAS))
+def test_sanitising_preserves_the_shape(name: str) -> None:
+    """Only constraints are removed — never a property, type, or enum."""
+    original, clean = ALL_SCHEMAS[name], sanitize_schema(ALL_SCHEMAS[name])
+
+    def shape(node: Any) -> Any:
+        if isinstance(node, dict):
+            return {
+                key: shape(value)
+                for key, value in sorted(node.items())
+                if key not in REJECTED_KEYWORDS
+                and key not in {"minItems", "description"}
+            }
+        if isinstance(node, list):
+            return [shape(item) for item in node]
+        return node
+
+    assert shape(original) == shape(clean)
+
+
+def test_a_removed_constraint_is_still_stated_to_the_model() -> None:
+    """Dropping it from the wire must not drop it from the instructions."""
+    clean = sanitize_schema(PLAN_SCHEMA)
+    description = clean["properties"]["hypotheses"]["description"]
+    assert "At least 2" in description
+    assert "At most 8" in description
+
+
+def test_a_supported_min_items_stays_on_the_wire() -> None:
+    """0 and 1 are accepted, so they keep being machine-enforced."""
+    clean = sanitize_schema(PLAN_SCHEMA)
+    assert clean["properties"]["planned_tools"]["minItems"] == 1
+
+
+def test_the_removed_constraints_are_re_checked_against_the_reply() -> None:
+    """The point of moving them: they are still enforced, just here."""
+    one_cause = {
+        "scope": "array",
+        "opening_reasoning": "...",
+        "hypotheses": [{"id": "H1", "cause": "soiling"}],
+        "planned_tools": ["compute_temp_corrected_pr"],
+    }
+    broken = violations(PLAN_SCHEMA, one_cause)
+    assert broken and "at least 2" in broken[0]
+
+    two_causes = {**one_cause, "hypotheses": [{"id": "H1"}, {"id": "H2"}]}
+    assert violations(PLAN_SCHEMA, two_causes) == []
+
+
+def test_a_confidence_outside_the_unit_interval_is_caught() -> None:
+    assert violations(SYNTHESIS_SCHEMA, {"confidence": 1.4})
+    assert violations(SYNTHESIS_SCHEMA, {"confidence": -0.1})
+    assert violations(SYNTHESIS_SCHEMA, {"confidence": 0.78}) == []
+
+
+def test_booleans_are_not_range_checked_as_numbers() -> None:
+    """`bool` subclasses `int`; a naive check would compare True against a
+    minimum and produce nonsense."""
+    schema = {"properties": {"flag": {"type": "boolean", "minimum": 5}}}
+    assert violations(schema, {"flag": True}) == []

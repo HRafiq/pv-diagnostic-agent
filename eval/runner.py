@@ -25,7 +25,7 @@ from eval.compare import compare, comparison_table
 from eval.golden import build_golden_set, composition, load_cases, write_cases
 from eval.metrics import CaseScore, Prediction, aggregate, confusion, score_case
 from eval.scenarios import materialise
-from src.agent.llm import build_client
+from src.agent.llm import BudgetExceeded, build_client
 from src.agent.loop_plain import investigate
 from src.baseline.rules import RulesEngine
 from src.config import REPO_ROOT, Settings, build_clock
@@ -109,6 +109,7 @@ def run_agent_engine(
 
     scores: list[CaseScore] = []
     predictions: list[Prediction] = []
+    failures: list[tuple[str, str]] = []
 
     for case in cases:
         bundle = load_plant(case.system_id, DATA_DIR)
@@ -122,19 +123,52 @@ def run_agent_engine(
         client = build_client(load_models_config_cached(), settings.anthropic_api_key)
 
         started = time.monotonic()
-        out = investigate(
-            case.question,
-            ctx,
-            client,
-            clock,
-            investigation_id=f"INV-{case.id}",
-            start=case.start,
-            end=case.end,
-            trace_root=root,
-            max_tools_per_cycle=max_tools_per_cycle,
-            critic=None if review else False,
-            knowledge=knowledge,
-        )
+        # One case must not be able to destroy the other forty-two. An
+        # investigation can die on a malformed reply, a transient API error, or
+        # a budget cap, and aborting the run then throws away every case that
+        # already succeeded — and the money they cost. A failed case is scored
+        # as what it is: an answer the agent could not produce.
+        #
+        # BudgetExceeded is deliberately *not* caught here. It means the loop
+        # is not terminating, which is a defect in the agent rather than a bad
+        # case, and it would otherwise repeat on every remaining case.
+        try:
+            out = investigate(
+                case.question,
+                ctx,
+                client,
+                clock,
+                investigation_id=f"INV-{case.id}",
+                start=case.start,
+                end=case.end,
+                trace_root=root,
+                max_tools_per_cycle=max_tools_per_cycle,
+                critic=None if review else False,
+                knowledge=knowledge,
+            )
+        except BudgetExceeded:
+            raise
+        except Exception as exc:  # reported, then scored as a failure
+            elapsed_ms = int((time.monotonic() - started) * 1000)
+            print(f"  {case.id}  FAILED: {type(exc).__name__}: {exc}")
+            failures.append((case.id, f"{type(exc).__name__}: {exc}"))
+            predictions.append(
+                Prediction(
+                    case_id=case.id,
+                    category=None,
+                    cause=None,
+                    settled=False,
+                    candidate_causes=(),
+                    resolving_measurement=None,
+                    tools_called=(),
+                    unplanned_tools=(),
+                    critic_cycles=0,
+                    cost_usd=0.0,
+                    latency_ms=elapsed_ms,
+                )
+            )
+            scores.append(score_case(case, predictions[-1]))
+            continue
         elapsed_ms = int((time.monotonic() - started) * 1000)
 
         finding = out.finding
@@ -170,6 +204,15 @@ def run_agent_engine(
         )
         if out.ungrounded_numbers:
             print(f"         UNGROUNDED FIGURES: {out.ungrounded_numbers}")
+
+    if failures:
+        # Said out loud, not buried. These cases are in the denominator as
+        # failures, so a reader must know how much of the score is "the agent
+        # answered badly" versus "the agent did not answer".
+        print(f"\n  {len(failures)} of {len(cases)} cases failed outright:")
+        for case_id, reason in failures:
+            print(f"    {case_id}  {reason}")
+        print("  They are scored as unsettled, which is what they were.")
 
     return scores, predictions
 

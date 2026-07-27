@@ -1238,3 +1238,72 @@ that validates the request *without* making it. Where a path cannot be executed
 in CI, the obligation is to find the part of it that can be checked offline and
 check that, rather than let "no key available" stand in for "no coverage
 possible."
+
+---
+
+## 0045 — Structured outputs take a subset of JSON Schema (2026-07-26)
+
+**The bug.** With the SDK pin fixed (0044), the request reached the API and was
+rejected:
+
+```
+400 output_config.format.schema: For 'array' type, 'minItems' values other
+than 0 or 1 are not supported (got: [2, 5])
+```
+
+`PLAN_SCHEMA` set `minItems: 2, maxItems: 8` on the planner's hypotheses list.
+Structured outputs accept a *subset* of JSON Schema: array-length bounds beyond
+0/1, numeric bounds, string-length bounds, `pattern` and `multipleOf` are all
+rejected. `SYNTHESIS_SCHEMA` carried three more (`minimum`/`maximum` on
+confidence, `minimum` on energy at stake) and would have produced the next 400
+immediately after the first was fixed.
+
+**Why deleting the constraints was not an option.** `minItems: 2` on the
+hypothesis list is not decoration — a "differential diagnosis" that enumerates
+one cause is a guess with extra steps, and the whole project rests on the
+distinction. A confidence outside [0, 1] is meaningless. The constraints had to
+survive; only their enforcement point could move.
+
+**Decision.** `sanitize_schema()` strips what the API rejects and appends each
+removed constraint to the field's `description`, so the model is still *told*
+("At least 2 entries. At most 8 entries."). `violations()` re-checks the same
+constraints against the parsed reply, and `AnthropicClient.complete` raises when
+one is broken. The requirement is unchanged; it is now enforced in this file
+rather than upstream, and stated in both places.
+
+`minItems` of 0 or 1 **is** accepted, so it stays on the wire and stays
+machine-enforced — `planned_tools` keeps its `minItems: 1`.
+
+**The guard.** `tests/test_llm_request.py` walks every schema the agent sends
+and fails on any keyword the API rejects, checks that sanitising removes only
+constraints (never a property, type or enum), that a removed constraint still
+appears in the description, and that `violations()` catches the reply that
+breaks it. Verified by disabling the sanitiser and confirming it reproduces the
+reported 400 as an assertion — which also surfaced the synthesizer's three,
+before they cost a second run.
+
+## 0046 — One bad case must not destroy the other forty-two (2026-07-26)
+
+**The problem this session made unmissable.** A 43-case agent evaluation costs
+real money and takes a long time. Both bugs above surfaced as an exception out
+of `investigate()` on the *first* case, which propagated through
+`run_agent_engine` and aborted the entire run. Twice. Had either failed on case
+40 instead, thirty-nine successful investigations — and what they cost — would
+have been discarded with them.
+
+**Decision.** `run_agent_engine` catches per case. A failed investigation is
+recorded as what it is — an answer the agent could not produce: unsettled, no
+category, no tools called — and stays in the denominator, because dropping it
+would flatter the engine by removing its failures from the score. The run then
+continues. At the end the failures are listed explicitly, with the reason, so a
+reader can tell "the agent answered badly" from "the agent did not answer".
+
+`BudgetExceeded` is deliberately **not** caught. It means the loop is not
+terminating, which is a defect in the agent rather than a bad case, and
+swallowing it would repeat the same runaway forty-three times.
+
+**Note on what this is not.** Catching broadly around a whole investigation is
+usually a smell — it can hide defects behind a tidy score. It earns its place
+here only because the failure is *reported by case ID with its exception text*
+and *counted as a failure*, never silently absorbed. A quiet `except Exception:
+pass` in this position would be strictly worse than the crash it replaced.

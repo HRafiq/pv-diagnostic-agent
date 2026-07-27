@@ -36,6 +36,8 @@ __all__ = [
     "LLMResponse",
     "ScriptedClient",
     "request_kwargs",
+    "sanitize_schema",
+    "violations",
 ]
 
 
@@ -85,6 +87,113 @@ class LLMClient(Protocol):
 
 
 # ---------------------------------------------------------------------------
+# Schema sanitising
+# ---------------------------------------------------------------------------
+# Structured outputs accept a subset of JSON Schema. These keywords are
+# rejected outright — `minItems: 2` returns
+#   "For 'array' type, 'minItems' values other than 0 or 1 are not supported"
+# — so they cannot reach the wire. But several of them are load-bearing here:
+# "at least two possible causes" is the difference between a differential
+# diagnosis and a guess, and a confidence outside [0, 1] is meaningless.
+#
+# So they are moved rather than dropped. Each one is stated in the field's
+# description, where the model still reads it, and re-checked against the
+# parsed reply by `violations()`. The constraint survives; only its enforcement
+# point changes, from the API to this file.
+_ARRAY_BOUNDS = ("minItems", "maxItems")
+_NUMBER_BOUNDS = ("minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum")
+_STRING_BOUNDS = ("minLength", "maxLength", "pattern")
+_UNSUPPORTED = (*_ARRAY_BOUNDS, *_NUMBER_BOUNDS, *_STRING_BOUNDS, "multipleOf")
+
+# `minItems` of 0 or 1 *is* accepted, so it stays on the wire.
+_ALLOWED_MIN_ITEMS = (0, 1)
+
+
+def _describe(keyword: str, value: Any) -> str:
+    return {
+        "minItems": f"At least {value} entries.",
+        "maxItems": f"At most {value} entries.",
+        "minimum": f"No less than {value}.",
+        "maximum": f"No greater than {value}.",
+        "exclusiveMinimum": f"Greater than {value}.",
+        "exclusiveMaximum": f"Less than {value}.",
+        "minLength": f"At least {value} characters.",
+        "maxLength": f"At most {value} characters.",
+        "multipleOf": f"A multiple of {value}.",
+        "pattern": f"Matching {value}.",
+    }.get(keyword, f"{keyword}: {value}.")
+
+
+def sanitize_schema(schema: Any) -> Any:
+    """Return a copy the structured-output API will accept.
+
+    Constraints it rejects are removed from the schema and appended to the
+    field's `description`, so the requirement still reaches the model as
+    instruction even though it is no longer machine-enforced upstream.
+    """
+    if isinstance(schema, list):
+        return [sanitize_schema(item) for item in schema]
+    if not isinstance(schema, dict):
+        return schema
+
+    out: dict[str, Any] = {}
+    moved: list[str] = []
+    for key, value in schema.items():
+        if key == "minItems" and value in _ALLOWED_MIN_ITEMS:
+            out[key] = value
+            continue
+        if key in _UNSUPPORTED:
+            moved.append(_describe(key, value))
+            continue
+        out[key] = sanitize_schema(value)
+
+    if moved:
+        description = str(out.get("description", "")).strip()
+        out["description"] = " ".join([description, *moved]).strip()
+    return out
+
+
+def violations(schema: Any, value: Any, path: str = "") -> list[str]:
+    """Check a parsed reply against the constraints `sanitize_schema` removed.
+
+    Only those: everything else the API still enforces. Returns human-readable
+    strings rather than raising, so a caller can decide whether one bad field
+    is worth failing a whole run over.
+    """
+    found: list[str] = []
+    if not isinstance(schema, dict):
+        return found
+    where = path or "(root)"
+
+    if isinstance(value, list):
+        low, high = schema.get("minItems"), schema.get("maxItems")
+        if isinstance(low, int) and len(value) < low:
+            found.append(f"{where}: {len(value)} entries, needs at least {low}")
+        if isinstance(high, int) and len(value) > high:
+            found.append(f"{where}: {len(value)} entries, allows at most {high}")
+        item_schema = schema.get("items")
+        for index, item in enumerate(value):
+            found.extend(violations(item_schema, item, f"{where}[{index}]"))
+
+    elif isinstance(value, bool):
+        pass  # bool is an int subclass; never range-check it
+
+    elif isinstance(value, int | float):
+        low, high = schema.get("minimum"), schema.get("maximum")
+        if isinstance(low, int | float) and value < low:
+            found.append(f"{where}: {value} is below the minimum of {low}")
+        if isinstance(high, int | float) and value > high:
+            found.append(f"{where}: {value} is above the maximum of {high}")
+
+    elif isinstance(value, dict):
+        for name, sub in (schema.get("properties") or {}).items():
+            if name in value:
+                found.extend(violations(sub, value[name], f"{where}.{name}"))
+
+    return found
+
+
+# ---------------------------------------------------------------------------
 # Request construction
 # ---------------------------------------------------------------------------
 def request_kwargs(
@@ -116,7 +225,10 @@ def request_kwargs(
     if cfg.effort:
         output_config["effort"] = cfg.effort
     if schema is not None:
-        output_config["format"] = {"type": "json_schema", "schema": schema}
+        output_config["format"] = {
+            "type": "json_schema",
+            "schema": sanitize_schema(schema),
+        }
     if output_config:
         kwargs["output_config"] = output_config
     if cfg.thinking == "adaptive":
@@ -200,6 +312,13 @@ class AnthropicClient:
                     f"{node} was asked for structured output but returned "
                     f"unparseable text: {text[:200]!r}"
                 ) from exc
+            # The constraints the API cannot enforce, checked here instead.
+            broken = violations(schema, parsed)
+            if broken:
+                raise ValueError(
+                    f"{node} returned a reply that breaks its schema: "
+                    + "; ".join(broken)
+                )
 
         return LLMResponse(
             text=text,
