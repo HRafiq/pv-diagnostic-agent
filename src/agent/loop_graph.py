@@ -37,6 +37,7 @@ from typing import Any, Literal
 
 from src.agent.llm import BudgetExceeded, LLMClient
 from src.agent.loop_plain import (
+    _MAX_UNPRODUCTIVE_LOOKUPS,
     Critic,
     InvestigationResult,
     _accrue,
@@ -94,6 +95,7 @@ class _Run:
         self.writer = writer
         self.out = out
         self.knowledge_brief = ""
+        self.unproductive_lookups = 0
         self.revision_request: str | None = None
         self.measurements_this_cycle = 0
         self.router_turns = 0
@@ -242,10 +244,26 @@ def build_graph(run: _Run) -> Any:
         _apply_exclusions(state, decision.excludes)
         matched = run.knowledge.match(decision.look_up_causes)
         fetched = run.knowledge.brief_for(matched)
-        if fetched not in run.knowledge_brief:
+        # Same guard as the plain loop: a lookup whose answer is already in the
+        # brief changes nothing the router can see, so it asks again. Kept in
+        # step here because the equivalence test compares the two run for run.
+        if fetched and fetched not in run.knowledge_brief:
             run.knowledge_brief = "\n\n".join(
                 filter(None, [run.knowledge_brief, fetched])
             )
+            run.unproductive_lookups = 0
+        else:
+            run.unproductive_lookups += 1
+            note = (
+                "ALREADY LOOKED UP: "
+                + " and ".join(decision.look_up_causes)
+                + ". Looking these up again returns nothing new. "
+                "Take a measurement, or stop."
+            )
+            if note not in run.knowledge_brief:
+                run.knowledge_brief = "\n\n".join(
+                    filter(None, [run.knowledge_brief, note])
+                )
         run.emit(
             TraceStep(
                 kind="retrieval",
@@ -369,6 +387,20 @@ def build_graph(run: _Run) -> Any:
         return state
 
     # ---------------- conditional edges --------------------------------
+    def after_look_up(state: AgentState) -> str:
+        """Back to the router, unless it keeps asking for what it already has.
+
+        The plain loop expresses this as a `break` out of the inner loop; here
+        it is a labelled transition. Both stop after the same number of
+        unproductive lookups, which is what keeps the equivalence test honest.
+        """
+        if run.unproductive_lookups >= _MAX_UNPRODUCTIVE_LOOKUPS:
+            run.out.stopped_because = (
+                "the router kept asking for knowledge it already had"
+            )
+            return "synthesise"
+        return "route"
+
     def after_route(state: AgentState) -> str:
         """The branch the plain loop expresses as an `if`, named.
 
@@ -422,7 +454,9 @@ def build_graph(run: _Run) -> Any:
         {"execute": "execute", "look_up": "look_up", "synthesise": "synthesise"},
     )
     graph.add_edge("execute", "route")
-    graph.add_edge("look_up", "route")
+    graph.add_conditional_edges(
+        "look_up", after_look_up, {"route": "route", "synthesise": "synthesise"}
+    )
     graph.add_conditional_edges(
         "synthesise", after_synthesise, {"review": "review", "done": END}
     )

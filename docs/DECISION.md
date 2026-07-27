@@ -1448,3 +1448,67 @@ new code written months later, which is the whole point of having them.
 **Also fixed in passing.** `investigate_with_graph` had to take the parameter
 too — the LangGraph equivalence test compares signatures, and a port that
 cannot show progress is not the same thing being compared.
+
+---
+
+## 0051 — Three failures from the first run that reached the agent (2026-07-26)
+
+The first run where the plumbing held long enough to watch the agent think
+exposed three things. Two were regressions from the previous two entries; one
+was a real defect in the agent that had never been reachable before.
+
+**1. Raising `max_tokens` required streaming (my regression, 0049).** The SDK
+refuses a *non*-streaming request whose `max_tokens` it estimates could run past
+ten minutes — an idle HTTP connection would drop first — and raises before
+sending anything:
+
+```
+ValueError: Streaming is required for operations that may take longer than
+10 minutes.
+```
+
+Raising the ceilings crossed that threshold on every node, so every case failed.
+`AnthropicClient` now streams and takes `get_final_message()`, which returns the
+same object `create()` would; streaming removes the limit on how *long* a reply
+may take without lowering how *long* it may be.
+
+Two follow-ons. The test doubles stubbed `messages.create`, so they passed while
+the real path was broken — they now mirror the streaming shape, and a test
+fails if `create` is used at all. And `is_systemic_request_error` only knew
+about `BadRequestError`; this is a plain `ValueError` raised client-side, so it
+slipped the net and failed all forty-three cases one at a time. It is now
+recognised, and the run stops on the first.
+
+**2. The shared argument vocabulary needed narrowing (my regression, 0047).**
+Closing the router's `args` object meant the router chooses from the union of
+every tool's fields. Tool argument models are `extra="forbid"`, so a field
+belonging to a different tool is a hard validation error — and the trace showed
+it repeatedly: "could not take this measurement — invalid arguments".
+
+`narrow_args` drops fields the chosen tool does not accept, at the router
+boundary. **Not** inside `run_tool`, which stays strict: a wrong argument passed
+from code must still fail loudly, and a test pins that it does. What is dropped
+is only the cost of sharing one vocabulary across eighteen tools.
+
+**3. The router could loop on lookups (a real defect).** Case G-007 spent
+*seventeen consecutive calls* asking what separates the same two causes. The
+mechanism: a lookup whose answer is already in the brief adds nothing the router
+can see, and the `look_up` branch costs an LLM call but deliberately does not
+count against the per-cycle measurement cap — so nothing stopped it but the
+per-investigation budget, minutes and dollars later.
+
+Fixed on both sides at once. An unproductive lookup is counted; the router is
+*told*, in the brief, that this lookup returns nothing new and it should measure
+or stop; and after three the cycle ends and the synthesiser answers from what
+was actually measured. An honest "not enough evidence" is a better outcome than
+a budget drained in a loop. The LangGraph port gets the same guard as a labelled
+transition, because the equivalence test compares the two run for run.
+
+**What the run showed that was not a bug.** The trace is worth reading on its
+own terms: the agent enumerated six or seven candidate causes per case, checked
+data quality and weather before performance, went to per-string current when the
+whole-plant ratio was ambiguous, and — on G-001 — took an *unplanned* lookup to
+separate `string_outage` from `shading`, settled, was sent back by the critic,
+and re-planned with three narrower causes. That is differential diagnosis, and
+it is the first direct evidence the design works. None of it was scoreable yet,
+because every case died before the answer was filed.

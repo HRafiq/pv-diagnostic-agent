@@ -20,6 +20,7 @@ believe a channel was checked when it was not.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from src.agent.llm import LLMResponse
 from src.agent.nodes.router import RouterDecision
@@ -27,7 +28,31 @@ from src.agent.state import AgentState
 from src.tools import ToolContext, ToolError, ToolResult, run_tool
 from src.trace.models import TraceStep
 
-__all__ = ["Execution", "execute"]
+__all__ = ["Execution", "execute", "narrow_args"]
+
+
+def narrow_args(tool: str, args: dict[str, Any]) -> dict[str, Any]:
+    """Keep only the arguments this tool accepts.
+
+    The router chooses from one shared argument vocabulary — the union of every
+    tool's fields — because structured outputs cannot express an open object
+    whose shape depends on another field (DECISION 0047). Tool argument models
+    are `extra="forbid"`, so a field belonging to a different tool is a hard
+    validation error, and the router filling one in turned a good measurement
+    into "could not take this measurement" on case after case.
+
+    Narrowing here rather than loosening `run_tool` is deliberate: `run_tool`
+    stays strict, so a genuinely wrong argument passed from code still fails
+    loudly. What is dropped here is only the cost of sharing one vocabulary
+    across eighteen tools.
+    """
+    from src.tools import REGISTRY
+
+    spec = REGISTRY.get(tool)
+    if spec is None:
+        return dict(args)
+    accepted = set(spec.args_model.model_fields)
+    return {key: value for key, value in args.items() if key in accepted}
 
 
 @dataclass(frozen=True)
@@ -63,7 +88,7 @@ def execute(
     result: ToolResult | None = None
     error: str | None = None
     try:
-        result = run_tool(decision.tool, ctx, decision.args)
+        result = run_tool(decision.tool, ctx, narrow_args(decision.tool, decision.args))
         summary = result.summary
     except ToolError as exc:
         error = f"{decision.tool}: {exc}"

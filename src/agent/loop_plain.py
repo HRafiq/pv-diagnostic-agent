@@ -94,6 +94,11 @@ def _accrue(target: InvestigationResult, response: LLMResponse | None) -> None:
     target.latency_ms += response.latency_ms
 
 
+# How many times the router may ask for knowledge it already has before the
+# cycle is ended. Two warnings, then stop — see the look_up branch below.
+_MAX_UNPRODUCTIVE_LOOKUPS = 3
+
+
 def investigate(
     question: str,
     ctx: ToolContext,
@@ -260,6 +265,7 @@ def investigate(
             # ---------------- route / execute -------------------------------
             stop_decision: RouterDecision | None = None
             measurements_this_cycle = 0
+            unproductive_lookups = 0
             # Two bounds, because they catch different failures. The first caps
             # *measurements*, which is what costs money and time. The second
             # caps router turns, so a router that keeps asking for lookups
@@ -288,14 +294,36 @@ def investigate(
                     # measuring. It costs nothing to run and can save a
                     # measurement that would not have decided anything, so it
                     # does not count against the per-cycle measurement cap.
+                    #
+                    # But it does cost an LLM call, and a lookup whose answer is
+                    # already in the brief changes nothing the router can see —
+                    # so it asks again, and again. One real run spent seventeen
+                    # consecutive calls re-reading the same entry before the
+                    # per-investigation budget stopped it. A lookup that adds
+                    # nothing is counted, told to the router in words it can act
+                    # on, and capped.
                     _accrue(out, decision.response)
                     _apply_exclusions(state, decision.excludes)
                     matched = knowledge_base.match(decision.look_up_causes)
                     fetched = knowledge_base.brief_for(matched)
-                    if fetched not in knowledge_brief:
+                    productive = bool(fetched) and fetched not in knowledge_brief
+                    if productive:
                         knowledge_brief = "\n\n".join(
                             filter(None, [knowledge_brief, fetched])
                         )
+                        unproductive_lookups = 0
+                    else:
+                        unproductive_lookups += 1
+                        note = (
+                            "ALREADY LOOKED UP: "
+                            + " and ".join(decision.look_up_causes)
+                            + ". Looking these up again returns nothing new. "
+                            "Take a measurement, or stop."
+                        )
+                        if note not in knowledge_brief:
+                            knowledge_brief = "\n\n".join(
+                                filter(None, [knowledge_brief, note])
+                            )
                     emit(
                         TraceStep(
                             kind="retrieval",
@@ -329,6 +357,13 @@ def investigate(
                             ),
                         )
                     )
+                    if unproductive_lookups >= _MAX_UNPRODUCTIVE_LOOKUPS:
+                        # It has been told twice and asked a third time. Stop
+                        # the cycle and let the synthesiser answer from what
+                        # has actually been measured — an honest "not enough
+                        # evidence" beats draining the budget in a loop.
+                        stop_decision = decision
+                        break
                     continue
 
                 # The router may narrow the window; it may not widen it past

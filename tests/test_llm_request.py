@@ -475,14 +475,82 @@ class _Reply:
         self.stop_details = SimpleNamespace(category=category) if category else None
 
 
+class _Stream:
+    """Stands in for the SDK's streaming context manager.
+
+    The client streams rather than calling `create` — the SDK refuses a
+    non-streaming request whose max_tokens could run past ten minutes, which is
+    every node now that the ceilings are raised. A double that stubs `create`
+    would pass while the real path was broken, so this mirrors the shape the
+    code actually uses.
+    """
+
+    def __init__(self, reply: _Reply) -> None:
+        self._reply = reply
+
+    def __enter__(self) -> _Stream:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+    def get_final_message(self) -> _Reply:
+        return self._reply
+
+
 def _client_returning(reply: _Reply) -> Any:
     from src.agent.llm import AnthropicClient
 
     client = AnthropicClient(models=load_models_config(), api_key="not-a-real-key")
     client._client = SimpleNamespace(
-        messages=SimpleNamespace(create=lambda **kw: reply)
+        messages=SimpleNamespace(stream=lambda **kw: _Stream(reply))
     )
     return client
+
+
+def test_the_client_streams_rather_than_blocking() -> None:
+    """Pinned because the failure mode is silent until a real call.
+
+    A non-streaming request whose max_tokens could exceed ten minutes raises
+    `ValueError: Streaming is required ...` *before sending anything* — so
+    raising the token ceilings broke every node at once, and a test double
+    stubbing `create` would not have noticed.
+    """
+    from src.agent.llm import AnthropicClient
+
+    used: list[str] = []
+    client = AnthropicClient(models=load_models_config(), api_key="not-a-real-key")
+    client._client = SimpleNamespace(
+        messages=SimpleNamespace(
+            stream=lambda **kw: (
+                used.append("stream"),
+                _Stream(_Reply('{"a": 1}', "end_turn")),
+            )[1],
+            create=lambda **kw: pytest.fail("blocking create must not be used"),
+        )
+    )
+    client.complete("synthesizer", "sys", "user", None)
+    assert used == ["stream"]
+
+
+def test_the_streaming_guard_counts_as_systemic() -> None:
+    """It is raised for every case identically, so the run must stop, not
+    reproduce it forty-three times."""
+    from src.agent.llm import is_systemic_request_error
+
+    guard = ValueError(
+        "Streaming is required for operations that may take longer than 10 minutes."
+    )
+    assert is_systemic_request_error(guard)
+    assert not is_systemic_request_error(ValueError("a reply broke its schema"))
+
+    try:
+        try:
+            raise guard
+        except ValueError as exc:
+            raise RuntimeError("planner failed") from exc
+    except RuntimeError as wrapped:
+        assert is_systemic_request_error(wrapped)
 
 
 def test_a_truncated_reply_says_it_was_truncated() -> None:

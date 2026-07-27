@@ -32,7 +32,7 @@ from src.agent.state import AgentState, CriticVerdict, Hypothesis
 from src.clock import FrozenClock
 from src.tools import ToolContext, run_tool, tool_names
 from src.trace.writer import read_trace
-from tests.conftest import context_for, synthetic_frame
+from tests.conftest import WINDOW, context_for, synthetic_frame
 
 
 # ---------------------------------------------------------------------------
@@ -1086,3 +1086,78 @@ def test_what_the_lookup_found_reaches_the_synthesiser(
     investigate("q", ctx, client, clock, investigation_id="INV-LU", critic=False)
     synth_prompt = next(u for node, _, u in client.calls if node == "synthesizer")
     assert "NOT SEPARABLE" in synth_prompt
+
+
+# ===========================================================================
+# What the first scored run exposed
+# ===========================================================================
+def test_a_repeated_lookup_does_not_spin_forever(
+    ctx: ToolContext, clock: FrozenClock
+) -> None:
+    """G-007 spent seventeen consecutive calls re-reading one knowledge entry.
+
+    A lookup whose answer is already in the brief changes nothing the router
+    can see, so it asks again — and the look_up branch costs an LLM call but
+    does not count against the per-cycle measurement cap. Only the
+    per-investigation budget stopped it, minutes and dollars later.
+    """
+    lookup = a_lookup(["sensor_drift", "soiling"], "which of these is it?")
+    result = run(
+        plans=[a_plan(["compute_temp_corrected_pr"])],
+        # Twenty identical lookups. Without the guard the loop takes all of
+        # them; with it, the cycle ends and the synthesiser answers.
+        routes=[lookup] * 20,
+        answers=[an_unsettled_answer()],
+        ctx=ctx,
+        clock=clock,
+        **WINDOW,
+    )
+
+    lookups = [s for s in result.steps if s.kind == "retrieval"]
+    assert len(lookups) <= 5, (
+        f"the router made {len(lookups)} lookups without learning anything new"
+    )
+    assert result.finding is not None
+
+
+def test_arguments_meant_for_another_tool_are_dropped(
+    ctx: ToolContext, clock: FrozenClock
+) -> None:
+    """The router picks from one shared argument vocabulary — the union of
+    every tool's fields — because structured outputs cannot express an object
+    whose shape depends on another field. Tool models are `extra="forbid"`, so
+    a stray field turned a good measurement into "could not take this
+    measurement" on case after case."""
+    result = run(
+        plans=[a_plan(["compute_temp_corrected_pr"])],
+        routes=[
+            a_call(
+                "compute_temp_corrected_pr",
+                args={"min_run": 8, "baseline_days": 30, "wash_quantile": 0.9},
+            ),
+            a_stop(),
+        ],
+        answers=[a_settled_answer()],
+        ctx=ctx,
+        clock=clock,
+        **WINDOW,
+    )
+
+    assert not result.errors, f"the measurement failed: {result.errors}"
+    measured = [s for s in result.steps if s.kind in ("tool", "adaptive")]
+    assert measured and "could not take this measurement" not in (
+        measured[0].result or ""
+    )
+
+
+def test_a_genuinely_wrong_argument_still_fails_loudly() -> None:
+    """Narrowing happens at the router boundary, not inside `run_tool`. A wrong
+    argument passed from code must still be an error, or the guard is gone."""
+    from src.tools import ToolError, run_tool
+
+    with pytest.raises(ToolError, match="invalid arguments"):
+        run_tool(
+            "compute_temp_corrected_pr",
+            context_for(synthetic_frame()),
+            {"start": "2017-05-16", "not_a_real_argument": 1},
+        )

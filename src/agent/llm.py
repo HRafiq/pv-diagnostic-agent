@@ -86,8 +86,21 @@ def is_systemic_request_error(exc: BaseException) -> bool:
 
     if isinstance(exc, anthropic.BadRequestError):
         return True
+
+    # The SDK raises a plain ValueError, before any request, for a
+    # non-streaming call whose max_tokens could exceed ten minutes. That is a
+    # configuration defect in this repository, identical for every case — and
+    # it is not a BadRequestError, so it slipped through an earlier version of
+    # this check and failed all forty-three cases one at a time.
+    if isinstance(exc, ValueError) and "Streaming is required" in str(exc):
+        return True
+
     cause = exc.__cause__ or exc.__context__
-    return isinstance(cause, anthropic.BadRequestError)
+    if cause is None:
+        return False
+    if isinstance(cause, anthropic.BadRequestError):
+        return True
+    return isinstance(cause, ValueError) and "Streaming is required" in str(cause)
 
 
 @dataclass
@@ -342,7 +355,17 @@ class AnthropicClient:
         kwargs = request_kwargs(cfg, system, user, schema)
 
         started = time.monotonic()
-        message = self._client.messages.create(**kwargs)
+        # Streamed, always. The SDK refuses a *non*-streaming request whose
+        # max_tokens it estimates could run past ten minutes — an idle HTTP
+        # connection would drop first — and raises before sending anything:
+        #   ValueError: Streaming is required for operations that may take
+        #   longer than 10 minutes.
+        # Raising the token ceilings (DECISION 0049) crossed that threshold on
+        # every node, so every case failed. Streaming removes the ceiling on
+        # how long a reply may take without lowering how long it may be, and
+        # `get_final_message()` returns the same object `create()` would.
+        with self._client.messages.stream(**kwargs) as stream:
+            message = stream.get_final_message()
         latency_ms = int((time.monotonic() - started) * 1000)
 
         text = "".join(
