@@ -31,6 +31,59 @@ from src.tools import ToolResult, tool_names
 __all__ = ["ROUTE_SCHEMA", "RouterDecision", "route"]
 
 
+# Structured outputs reject `additionalProperties: true`, so the tool-argument
+# object cannot be open. It is built from the tool registry instead — which is
+# strictly better than the open object it replaces: the router now sees the real
+# argument vocabulary rather than being free to invent a name that `run_tool`
+# would reject downstream.
+#
+# Every field is nullable and every field is listed in `required`. That is the
+# shape that satisfies the strictest reading of the API's object rules, and
+# nulls are dropped in `_clean_args` before the tool ever sees them, so "null"
+# and "not supplied" mean the same thing.
+_JSON_TYPES: dict[type, str] = {
+    bool: "boolean",
+    int: "integer",
+    float: "number",
+    str: "string",
+}
+
+
+def _args_schema() -> dict[str, Any]:
+    from src.tools import REGISTRY
+
+    properties: dict[str, Any] = {}
+    for spec in REGISTRY.values():
+        for name, info in spec.args_model.model_fields.items():
+            if name in properties:
+                continue
+            annotation = info.annotation
+            base = next(
+                (
+                    python
+                    for python in _JSON_TYPES
+                    if python is annotation or python.__name__ in str(annotation)
+                ),
+                str,
+            )
+            properties[name] = {
+                "anyOf": [{"type": _JSON_TYPES[base]}, {"type": "null"}],
+                "description": info.description or f"{name} for tools that take it.",
+            }
+
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": sorted(properties),
+        "properties": dict(sorted(properties.items())),
+        "description": (
+            "Arguments for the tool. Set every field you do not need to null; "
+            "null and omitted mean the same thing, and a tool with all-null "
+            "arguments runs on its defaults over the window."
+        ),
+    }
+
+
 ROUTE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
@@ -56,13 +109,7 @@ ROUTE_SCHEMA: dict[str, Any] = {
             "enum": [*tool_names(), ""],
             "description": "Empty string when stopping.",
         },
-        "args": {
-            "type": "object",
-            "additionalProperties": True,
-            "description": (
-                "Arguments for the tool. {} for its defaults over the window."
-            ),
-        },
+        "args": _args_schema(),
         "reason_for_choosing": {
             "type": "string",
             "description": (
@@ -84,6 +131,18 @@ ROUTE_SCHEMA: dict[str, Any] = {
         },
     },
 }
+
+
+def _clean_args(raw: Any) -> dict[str, Any]:
+    """Drop the nulls the schema requires the model to send.
+
+    Every argument is `required` and nullable so the object satisfies the
+    structured-output rules; a null means "not supplied". Passing them through
+    would override a tool's own defaults with None.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    return {key: value for key, value in raw.items() if value is not None}
 
 
 @dataclass(frozen=True)
@@ -167,11 +226,11 @@ def route(
             action="stop", reason=reason, excludes=excludes, response=response
         )
 
-    args = payload.get("args") or {}
+    args = _clean_args(payload.get("args"))
     return RouterDecision(
         action="call_tool",
         tool=tool,
-        args=dict(args) if isinstance(args, dict) else {},
+        args=args,
         reason=reason,
         excludes=excludes,
         response=response,

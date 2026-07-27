@@ -35,6 +35,7 @@ __all__ = [
     "LLMClient",
     "LLMResponse",
     "ScriptedClient",
+    "is_systemic_request_error",
     "request_kwargs",
     "sanitize_schema",
     "violations",
@@ -43,6 +44,30 @@ __all__ = [
 
 class BudgetExceeded(RuntimeError):
     """Raised when an investigation would exceed its configured cost or call cap."""
+
+
+def is_systemic_request_error(exc: BaseException) -> bool:
+    """True when retrying with a different case cannot possibly help.
+
+    A 400 `invalid_request_error` says the *request* is malformed — a schema the
+    API rejects, a parameter that does not exist. That is a defect in this
+    codebase, identical for every case, so a per-case retry loop will reproduce
+    it exactly N times. It did: forty-three identical 400s in one run, each
+    costing a round trip and a line of output, none of them informative after
+    the first.
+
+    Rate limits, overloads and timeouts are the opposite — worth continuing
+    past, because the next case may well succeed.
+    """
+    try:
+        import anthropic
+    except ImportError:  # pragma: no cover - anthropic is a core dependency
+        return False
+
+    if isinstance(exc, anthropic.BadRequestError):
+        return True
+    cause = exc.__cause__ or exc.__context__
+    return isinstance(cause, anthropic.BadRequestError)
 
 
 @dataclass
@@ -150,6 +175,13 @@ def sanitize_schema(schema: Any) -> Any:
     if moved:
         description = str(out.get("description", "")).strip()
         out["description"] = " ".join([description, *moved]).strip()
+
+    # Structured outputs reject `additionalProperties: true` and require it to
+    # be present and false on every object. Set here rather than trusted to
+    # each schema author, because the failure is a 400 on a request that has
+    # already been paid for in latency and, on an evaluation, in real money.
+    if out.get("type") == "object":
+        out["additionalProperties"] = False
     return out
 
 

@@ -1307,3 +1307,57 @@ usually a smell — it can hide defects behind a tidy score. It earns its place
 here only because the failure is *reported by case ID with its exception text*
 and *counted as a failure*, never silently absorbed. A quiet `except Exception:
 pass` in this position would be strictly worse than the crash it replaced.
+
+---
+
+## 0047 — Objects must be closed, and a 400 is never one case's problem (2026-07-26)
+
+**The bug.** After 0045, the next call returned:
+
+```
+400 output_config.format.schema: For 'object' type, 'additionalProperties: true'
+is not supported. Please set 'additionalProperties' to false
+```
+
+`ROUTE_SCHEMA`'s tool-argument object was deliberately open — it holds whatever
+arguments the chosen tool takes, which differ per tool. Structured outputs
+cannot express that: every object must carry `additionalProperties: false`.
+
+**Why the 0045 guard missed it.** That test checked what a schema must *not*
+carry — rejected keywords. This is the complement: what it must carry. Two
+different failures, and only the first had a guard. The lesson is narrow and
+worth stating: a validity checker written from an error message covers that
+error message.
+
+**Decision.**
+
+- The router's `args` object is built from the tool registry — the union of
+  every tool's argument fields, all nullable, all listed in `required`, and the
+  object closed. This is **better than the open object it replaces**: the
+  router now sees the real argument vocabulary instead of being free to invent
+  a name that `run_tool` would reject downstream. `_clean_args` drops the nulls
+  before a tool sees them, so "null" and "not supplied" mean the same thing.
+  A test asserts the schema's field set equals the registry's, so the two
+  cannot drift into a silent capability loss.
+- `sanitize_schema` now sets `additionalProperties: false` on every object it
+  passes. Enforced structurally rather than left to each schema author, because
+  the failure is a 400 on a request already paid for in latency and money.
+
+## 0048 — Per-case isolation was right; applying it to a 400 was not (2026-07-26)
+
+**What went wrong with the fix from 0046.** Isolating failures per case is
+correct for a bad case. It is exactly wrong for a malformed request: the run
+produced **forty-three identical 400s**, one round trip each, and the only
+informative one was the first. Isolation turned a fast failure into a slow one.
+
+**Decision.** `is_systemic_request_error()` distinguishes the two. A 400
+`invalid_request_error` — including one wrapped by a node on its way up — means
+the *request* is malformed, which is a defect in this codebase and identical
+for every case; the run stops immediately and says so, naming the case and the
+error and stating that the remaining cases would reproduce it. Rate limits,
+overloads and timeouts stay isolated per case, because the next case may well
+succeed.
+
+**The principle.** Continue past what varies between cases; stop on what does
+not. Retrying a deterministic failure N times is not resilience, it is N times
+the cost for one bit of information.

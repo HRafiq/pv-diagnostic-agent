@@ -25,7 +25,7 @@ from eval.compare import compare, comparison_table
 from eval.golden import build_golden_set, composition, load_cases, write_cases
 from eval.metrics import CaseScore, Prediction, aggregate, confusion, score_case
 from eval.scenarios import materialise
-from src.agent.llm import BudgetExceeded, build_client
+from src.agent.llm import BudgetExceeded, build_client, is_systemic_request_error
 from src.agent.loop_plain import investigate
 from src.baseline.rules import RulesEngine
 from src.config import REPO_ROOT, Settings, build_clock
@@ -149,6 +149,17 @@ def run_agent_engine(
         except BudgetExceeded:
             raise
         except Exception as exc:  # reported, then scored as a failure
+            # A malformed request is a defect here, not a bad case. Isolating it
+            # per case just reproduces it once per case — which is exactly what
+            # happened: forty-three identical 400s, one round trip each.
+            if is_systemic_request_error(exc):
+                raise RuntimeError(
+                    f"{case.id} failed with a malformed request, which every "
+                    f"remaining case would reproduce identically. Stopping so "
+                    f"the schema or parameter can be fixed once rather than "
+                    f"{len(cases)} times.\n\n  {type(exc).__name__}: {exc}"
+                ) from exc
+
             elapsed_ms = int((time.monotonic() - started) * 1000)
             print(f"  {case.id}  FAILED: {type(exc).__name__}: {exc}")
             failures.append((case.id, f"{type(exc).__name__}: {exc}"))

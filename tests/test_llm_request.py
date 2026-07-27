@@ -316,3 +316,127 @@ def test_booleans_are_not_range_checked_as_numbers() -> None:
     minimum and produce nonsense."""
     schema = {"properties": {"flag": {"type": "boolean", "minimum": 5}}}
     assert violations(schema, {"flag": True}) == []
+
+
+@pytest.mark.parametrize("name", sorted(ALL_SCHEMAS))
+def test_every_object_is_closed(name: str) -> None:
+    """`additionalProperties: false` is required on every object.
+
+    The keyword-rejection test above checks what a schema must *not* carry.
+    This checks what it must carry — the distinction that let a second 400
+    through after the first was fixed:
+
+      400 For 'object' type, 'additionalProperties: true' is not supported.
+
+    The router's tool-argument object was deliberately open, which is not
+    expressible here. It is built from the tool registry instead.
+    """
+    clean = sanitize_schema(ALL_SCHEMAS[name])
+
+    open_objects = [
+        f"{path} (additionalProperties={value!r})"
+        for path, value in _objects_with_bad_additional_properties(clean)
+    ]
+    assert not open_objects, (
+        f"the {name} schema has objects the API will reject: {open_objects}"
+    )
+
+
+def _objects_with_bad_additional_properties(
+    node: Any, path: str = "(root)"
+) -> list[tuple[str, Any]]:
+    found: list[tuple[str, Any]] = []
+    if isinstance(node, dict):
+        if node.get("type") == "object":
+            value = node.get("additionalProperties", "<missing>")
+            if value is not False:
+                found.append((path, value))
+        for key, value in node.items():
+            found.extend(
+                _objects_with_bad_additional_properties(value, f"{path}.{key}")
+            )
+    elif isinstance(node, list):
+        for index, item in enumerate(node):
+            found.extend(
+                _objects_with_bad_additional_properties(item, f"{path}[{index}]")
+            )
+    return found
+
+
+def test_sanitising_closes_an_object_the_author_left_open() -> None:
+    """Enforced structurally, not left to each schema author to remember."""
+    assert (
+        sanitize_schema({"type": "object", "additionalProperties": True})[
+            "additionalProperties"
+        ]
+        is False
+    )
+    assert (
+        sanitize_schema({"type": "object", "properties": {}})["additionalProperties"]
+        is False
+    )
+
+
+def test_the_router_argument_vocabulary_matches_the_tools() -> None:
+    """The closed args object must name every argument a tool can take.
+
+    If they drift, the router cannot express a call the registry accepts —
+    a silent capability loss rather than an error.
+    """
+    from src.tools import REGISTRY
+
+    declared = set(ROUTE_SCHEMA["properties"]["args"]["properties"])
+    real = {
+        field for spec in REGISTRY.values() for field in spec.args_model.model_fields
+    }
+    assert declared == real, (
+        f"router args schema and tool registry disagree: "
+        f"only in schema {sorted(declared - real)}, "
+        f"only in tools {sorted(real - declared)}"
+    )
+
+
+def test_a_null_argument_means_not_supplied() -> None:
+    """Every arg is required-and-nullable to satisfy the object rules, so the
+    nulls must be dropped before a tool sees them and overrides its defaults."""
+    from src.agent.nodes.router import _clean_args
+
+    assert _clean_args({"start": "2017-05-16", "end": None, "min_run": 8}) == {
+        "start": "2017-05-16",
+        "min_run": 8,
+    }
+    assert _clean_args(None) == {}
+    assert _clean_args("not a dict") == {}
+
+
+def test_a_malformed_request_is_recognised_as_systemic() -> None:
+    """A 400 repeats identically for every case; a rate limit does not."""
+    import anthropic
+    import httpx
+
+    from src.agent.llm import is_systemic_request_error
+
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    bad = anthropic.BadRequestError(
+        "schema rejected",
+        response=httpx.Response(400, request=request),
+        body=None,
+    )
+    limited = anthropic.RateLimitError(
+        "slow down",
+        response=httpx.Response(429, request=request),
+        body=None,
+    )
+
+    assert is_systemic_request_error(bad)
+    assert not is_systemic_request_error(limited)
+    assert not is_systemic_request_error(ValueError("a bad reply"))
+
+    # Wrapped by a node before it reaches the runner.
+    try:
+        try:
+            raise bad
+        except anthropic.BadRequestError as exc:
+            raise RuntimeError("planner failed") from exc
+    except RuntimeError as wrapped:
+        assert is_systemic_request_error(wrapped)
