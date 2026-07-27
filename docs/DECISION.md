@@ -1361,3 +1361,48 @@ succeed.
 **The principle.** Continue past what varies between cases; stop on what does
 not. Retrying a deterministic failure N times is not resilience, it is N times
 the cost for one bit of information.
+
+---
+
+## 0049 — Why a reply ended is part of the reply (2026-07-26)
+
+**The bug.** The first run that got through the plumbing failed with:
+
+```
+ValueError: synthesizer was asked for structured output but returned
+unparseable text: '{"settled": true, "category": "not_the_plant", "cause":
+"String 3's current channel is a stuck/frozen sensor reporting a fake zero ...
+```
+
+The JSON was not malformed. It was **cut off mid-sentence** — the synthesiser
+hit its 8000-token cap. `max_tokens` bounds thinking *and* the reply together,
+and a synthesis at `effort: high` with adaptive thinking, a title, a summary, a
+full answer, an evidence ledger and candidate causes does not fit in 8000.
+
+The message was actively misleading. It blamed the model for bad JSON, which is
+the kind of error that sends someone to rewrite a prompt for an afternoon. The
+defect was a number in a config file.
+
+**Decision.**
+
+- `complete()` reads `stop_reason` before parsing. `max_tokens` raises
+  `TruncatedReply` naming the node, its cap, and where to change it; `refusal`
+  raises `RefusedReply` with the safety category. Both subclass `ValueError`, so
+  existing handling still catches them, but the message says what happened.
+  Genuinely malformed output still reports as unparseable — a test pins that the
+  new check does not swallow it.
+- Every node's `max_tokens` is raised: synthesiser 8000 → 32000, planner and
+  critic to 16000, with the `quality` profile scaled the same way. **A ceiling
+  costs nothing when it is not reached** — billing tracks tokens generated, not
+  tokens allowed — so a tight cap buys no saving and risks exactly this. The
+  original numbers were sized by guess, because nothing had ever run.
+- A test asserts a floor per node, so the caps cannot quietly drift back down.
+
+**The pattern, one more time.** Every failure in this sequence — 0044 through
+0049 — is a first-execution failure of a path that thirteen build steps never
+ran. The stale pin, the rejected schema keywords, the open object, and now the
+token budget were all invisible to a suite that mocks the model. That is not an
+argument against mocking it: `ScriptedClient` is what makes the orchestration
+testable at all. It is an argument that **the parts of a request that can be
+validated offline should be**, and that a config number nobody has exercised is
+a guess until a run says otherwise.

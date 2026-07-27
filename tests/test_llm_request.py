@@ -20,6 +20,7 @@ parameter types. It needs no key, makes no request, and costs nothing.
 from __future__ import annotations
 
 import inspect
+from types import SimpleNamespace
 from typing import Any, get_args, get_origin, get_type_hints
 
 import pytest
@@ -440,3 +441,101 @@ def test_a_malformed_request_is_recognised_as_systemic() -> None:
             raise RuntimeError("planner failed") from exc
     except RuntimeError as wrapped:
         assert is_systemic_request_error(wrapped)
+
+
+# ---------------------------------------------------------------------------
+# Why a reply ended
+# ---------------------------------------------------------------------------
+# The first working run failed on:
+#   ValueError: synthesizer was asked for structured output but returned
+#   unparseable text: '{"settled": true, "category": "not_the_plant", ...
+# The JSON was not malformed — it was cut off mid-sentence. `max_tokens` bounds
+# thinking and reply together, and 8000 was not enough for a synthesis at
+# effort=high. The message blamed the model for a budget problem, which is the
+# kind of error that sends someone to rewrite a prompt for an afternoon.
+class _Block:
+    type = "text"
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+
+class _Usage:
+    input_tokens = 100
+    output_tokens = 200
+
+
+class _Reply:
+    def __init__(
+        self, text: str, stop_reason: str, category: str | None = None
+    ) -> None:
+        self.content = [_Block(text)]
+        self.usage = _Usage()
+        self.stop_reason = stop_reason
+        self.stop_details = SimpleNamespace(category=category) if category else None
+
+
+def _client_returning(reply: _Reply) -> Any:
+    from src.agent.llm import AnthropicClient
+
+    client = AnthropicClient(models=load_models_config(), api_key="not-a-real-key")
+    client._client = SimpleNamespace(
+        messages=SimpleNamespace(create=lambda **kw: reply)
+    )
+    return client
+
+
+def test_a_truncated_reply_says_it_was_truncated() -> None:
+    from src.agent.llm import TruncatedReply
+
+    client = _client_returning(_Reply('{"settled": true, "cause": "stri', "max_tokens"))
+
+    with pytest.raises(TruncatedReply) as caught:
+        client.complete("synthesizer", "sys", "user", SCHEMA)
+
+    message = str(caught.value)
+    assert "token cap before finishing" in message
+    assert "max_tokens covers thinking" in message
+    assert "config/models.yaml" in message
+
+
+def test_a_refusal_is_not_reported_as_bad_json() -> None:
+    from src.agent.llm import RefusedReply
+
+    client = _client_returning(_Reply("", "refusal", category="cyber"))
+
+    with pytest.raises(RefusedReply) as caught:
+        client.complete("synthesizer", "sys", "user", SCHEMA)
+    assert "safety classifiers" in str(caught.value)
+    assert "cyber" in str(caught.value)
+
+
+def test_genuinely_unparseable_text_still_reports_as_such() -> None:
+    """The truncation check must not swallow a real formatting failure."""
+    client = _client_returning(_Reply("I'm afraid I can't do that.", "end_turn"))
+
+    with pytest.raises(ValueError, match="unparseable text"):
+        client.complete("synthesizer", "sys", "user", SCHEMA)
+
+
+def test_a_complete_reply_is_returned_normally() -> None:
+    client = _client_returning(_Reply('{"answer": "ok"}', "end_turn"))
+    response = client.complete("synthesizer", "sys", "user", SCHEMA)
+    assert response.parsed == {"answer": "ok"}
+
+
+@pytest.mark.parametrize(("profile", "node", "cfg"), NODES, ids=NODE_IDS)
+def test_every_node_has_room_for_its_reply(
+    profile: str, node: str, cfg: ModelConfig
+) -> None:
+    """max_tokens bounds thinking *and* the reply on these models.
+
+    A ceiling costs nothing when unused — billing tracks tokens generated — so
+    a tight one buys no saving and risks a truncated answer. These floors are
+    set from the first real run, where the synthesiser truncated at 8000.
+    """
+    floors = {"planner": 12000, "router": 1500, "synthesizer": 24000, "critic": 12000}
+    assert cfg.max_tokens >= floors[node], (
+        f"{profile}:{node} caps output at {cfg.max_tokens}, below the "
+        f"{floors[node]} this node needs for thinking plus a full reply"
+    )

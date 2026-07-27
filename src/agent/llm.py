@@ -34,7 +34,9 @@ __all__ = [
     "CachedClient",
     "LLMClient",
     "LLMResponse",
+    "RefusedReply",
     "ScriptedClient",
+    "TruncatedReply",
     "is_systemic_request_error",
     "request_kwargs",
     "sanitize_schema",
@@ -44,6 +46,24 @@ __all__ = [
 
 class BudgetExceeded(RuntimeError):
     """Raised when an investigation would exceed its configured cost or call cap."""
+
+
+class TruncatedReply(ValueError):
+    """The model ran out of output budget mid-reply.
+
+    A subclass of `ValueError` so existing handling still catches it, but named
+    so the failure reads as what it is. `max_tokens` bounds thinking plus
+    response text together, so a node with adaptive thinking and a long
+    structured reply can exhaust it and return valid-but-incomplete JSON.
+    """
+
+
+class RefusedReply(ValueError):
+    """The model's safety classifiers declined the request.
+
+    Returns HTTP 200 with empty or partial content and
+    `stop_reason == "refusal"`, so it must be checked rather than parsed.
+    """
 
 
 def is_systemic_request_error(exc: BaseException) -> bool:
@@ -330,6 +350,29 @@ class AnthropicClient:
             for block in message.content
             if getattr(block, "type", "") == "text"
         )
+
+        # Why the reply ended matters as much as what it says. Both of these
+        # arrive as a *successful* response whose text is empty or cut off
+        # mid-sentence, so without this check they surface downstream as
+        # "returned unparseable text" — a message that blames the model for bad
+        # JSON when the truth is a budget that ran out or a refusal.
+        stop_reason = getattr(message, "stop_reason", None)
+        if stop_reason == "max_tokens":
+            raise TruncatedReply(
+                f"{node} hit its {cfg.max_tokens}-token cap before finishing. "
+                f"max_tokens covers thinking *and* the reply, so a long answer "
+                f"at effort={cfg.effort!r} can exhaust it. Raise max_tokens for "
+                f"{node} in config/models.yaml, or lower its effort.\n"
+                f"  reply ended: ...{text[-120:]!r}"
+            )
+        if stop_reason == "refusal":
+            details = getattr(message, "stop_details", None)
+            category = getattr(details, "category", None)
+            raise RefusedReply(
+                f"{node} was declined by the model's safety classifiers"
+                + (f" (category {category})" if category else "")
+                + ". This is a successful HTTP response with no usable content."
+            )
         usage = message.usage
         cost = self.models.cost_usd(cfg.model, usage.input_tokens, usage.output_tokens)
         self.calls += 1
