@@ -9,8 +9,9 @@ Traces are gitignored. They are output, not source.
 
 from __future__ import annotations
 
+import contextlib
 import json
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import TracebackType
 
@@ -32,6 +33,12 @@ class TraceWriter:
         investigation_id: Names the file and links a Finding back to its trace.
         clock: Injected time source. Stamps each step with *simulated* time.
         root: Output directory. Created if missing.
+        on_step: Called with each written step. Injected rather than printed
+            from here, because `src/` is UI-agnostic (CLAUDE.md) — this is the
+            seam every step already passes through, so a caller that wants live
+            progress needs no hooks scattered across the nodes. Exceptions from
+            the callback are swallowed: a broken progress display must never
+            take down an investigation that is otherwise fine.
     """
 
     def __init__(
@@ -39,6 +46,7 @@ class TraceWriter:
         investigation_id: str,
         clock: Clock,
         root: Path | str = "traces",
+        on_step: Callable[[TraceStep], None] | None = None,
     ) -> None:
         if not investigation_id or "/" in investigation_id:
             raise ValueError(
@@ -52,6 +60,7 @@ class TraceWriter:
         self._path = self._root / f"{investigation_id}.jsonl"
         self._handle: object | None = None
         self._count = 0
+        self._on_step = on_step
 
     @property
     def path(self) -> Path:
@@ -91,6 +100,11 @@ class TraceWriter:
         # Flush every step: the dashboard tails this file to render a live run.
         self._handle.flush()  # type: ignore[attr-defined]
         self._count += 1
+
+        if self._on_step is not None:
+            # A progress display is never worth a failed run.
+            with contextlib.suppress(Exception):
+                self._on_step(stamped)
         return stamped
 
     def close(self) -> None:

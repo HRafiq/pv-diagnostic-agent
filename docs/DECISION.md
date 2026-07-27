@@ -1406,3 +1406,45 @@ argument against mocking it: `ScriptedClient` is what makes the orchestration
 testable at all. It is an argument that **the parts of a request that can be
 validated offline should be**, and that a config number nobody has exercised is
 a guess until a run says otherwise.
+
+---
+
+## 0050 — Live progress, hooked at the trace writer (2026-07-26)
+
+**The problem.** An agent evaluation printed nothing until a case finished. On
+a run where every case was going to fail the same way, that meant three or four
+minutes of silence before the first line of evidence — and no way to tell a
+working run from a hung one.
+
+**Where to put it.** Not prints scattered through the nodes. Every step already
+passes through one place — `TraceWriter.write`, which the dashboard tails for
+the same reason. `TraceWriter` gains an optional `on_step` callback, `investigate`
+and `investigate_with_graph` take and forward it, and `eval/progress.py` decides
+how to render.
+
+The split matters: `src/` stays UI-agnostic (CLAUDE.md), emitting steps and
+saying nothing about display. `eval/` prints. The dashboard makes a different
+choice from the same data. Adding this to `src/` as a print would have been
+three fewer lines and a rule broken.
+
+**Two things it deliberately does.**
+
+- Exceptions from the callback are suppressed, in both loops and the writer. A
+  progress display runs inside a paid evaluation; a bug in a *view* must never
+  take down the run it is describing. A test asserts the step is still recorded
+  when the display raises.
+- The `--quiet` counter checks `isatty()`. `\r` overwrites on a terminal and
+  concatenates into one unreadable line in a CI log or a redirect, so off a
+  terminal it goes quiet and only the per-case summaries remain.
+
+**Two checks the type system and the model made for me.** mypy rejected the
+first label map because it invented step kinds (`route`, `review`) that
+`StepKind` does not define — a label for an impossible kind is dead code that
+reads as coverage. And `TraceStep`'s own validator rejected a test fixture for
+an unplanned step with no `reason_for_choosing`, which is the rule that makes
+agency visible rather than asserted. Both are the project's guards working on
+new code written months later, which is the whole point of having them.
+
+**Also fixed in passing.** `investigate_with_graph` had to take the parameter
+too — the LangGraph equivalence test compares signatures, and a port that
+cannot show progress is not the same thing being compared.

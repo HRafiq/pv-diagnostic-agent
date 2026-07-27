@@ -121,6 +121,7 @@ uvicorn dashboard.app:app --reload                 # http://127.0.0.1:8000
 ```bash
 cp .env.example .env                               # add ANTHROPIC_API_KEY
 python -m eval.runner run --engine agent --split tuning
+uv run python -m eval.runner run --engine agent --split tuning --quiet
 python -m eval.runner compare --split heldback     # rules vs agent
 python -m eval.runner experiments --runs 3         # both ablations, mean ± spread
 ```

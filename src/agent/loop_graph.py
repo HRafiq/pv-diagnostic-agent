@@ -30,6 +30,7 @@ close to an even trade, which is itself the finding.
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal
@@ -79,7 +80,9 @@ class _Run:
         max_tools_per_cycle: int,
         writer: TraceWriter | None,
         out: InvestigationResult,
+        on_step: Callable[[TraceStep], None] | None = None,
     ) -> None:
+        self.on_step = on_step
         self.ctx = ctx
         self.client = client
         self.clock = clock
@@ -97,7 +100,16 @@ class _Run:
         self.stop_decision: RouterDecision | None = None
 
     def emit(self, step: TraceStep) -> None:
-        self.out.steps.append(self.writer.write(step) if self.writer else step)
+        # With a writer, progress is reported from inside `write`; without one
+        # it happens here, so a run with no trace directory still shows it.
+        if self.writer:
+            self.out.steps.append(self.writer.write(step))
+            return
+        self.out.steps.append(step)
+        if self.on_step is not None:
+            # Never let a display break a run.
+            with contextlib.suppress(Exception):
+                self.on_step(step)
 
 
 def build_graph(run: _Run) -> Any:
@@ -433,6 +445,7 @@ def investigate_with_graph(
     trace_root: Path | str | None = None,
     critic: Critic | None | Literal[False] = None,
     knowledge: Retriever | KnowledgeBase | None = None,
+    on_step: Callable[[TraceStep], None] | None = None,
 ) -> InvestigationResult:
     """Run one investigation through the graph.
 
@@ -452,7 +465,9 @@ def investigate_with_graph(
 
     writer: TraceWriter | None = None
     if trace_root is not None:
-        writer = TraceWriter(investigation_id, clock=clock, root=trace_root)
+        writer = TraceWriter(
+            investigation_id, clock=clock, root=trace_root, on_step=on_step
+        )
         writer.__enter__()
         out.trace_path = writer.path
 
@@ -470,6 +485,7 @@ def investigate_with_graph(
         max_tools_per_cycle=max_tools_per_cycle,
         writer=writer,
         out=out,
+        on_step=on_step,
     )
 
     try:

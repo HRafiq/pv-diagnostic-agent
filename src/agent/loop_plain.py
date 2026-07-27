@@ -19,6 +19,7 @@ is the only way to know whether the critic earns its cost.
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -108,6 +109,7 @@ def investigate(
     trace_root: Path | str | None = None,
     critic: Critic | None | Literal[False] = None,
     knowledge: Retriever | KnowledgeBase | None = None,
+    on_step: Callable[[TraceStep], None] | None = None,
 ) -> InvestigationResult:
     """Run one investigation end to end.
 
@@ -126,6 +128,9 @@ def investigate(
             `KnowledgeBase` to run with none. Both satisfy the same two-method
             interface, which is what makes the step 9 ablation a comparison
             rather than two different code paths.
+        on_step: Called with each trace step as it happens, for live progress.
+            Injected because `src/` is UI-agnostic; the caller decides whether
+            and how to display it. Works with or without `trace_root`.
     """
     window = slice_window(ctx.frame, start, end)
     brief = plant_brief(ctx, question, window)
@@ -147,12 +152,25 @@ def investigate(
 
     writer: TraceWriter | None = None
     if trace_root is not None:
-        writer = TraceWriter(investigation_id, clock=clock, root=trace_root)
+        writer = TraceWriter(
+            investigation_id, clock=clock, root=trace_root, on_step=on_step
+        )
         writer.__enter__()
         out.trace_path = writer.path
 
     def emit(step: TraceStep) -> None:
-        out.steps.append(writer.write(step) if writer else step)
+        # With a writer, progress is reported from inside `write` so the
+        # callback sees the stamped step (index and simulated timestamp filled
+        # in). Without one there is no writer to report from, so it happens
+        # here — a run with no trace directory still shows progress.
+        if writer:
+            out.steps.append(writer.write(step))
+            return
+        out.steps.append(step)
+        if on_step is not None:
+            # Never let a display break a run.
+            with contextlib.suppress(Exception):
+                on_step(step)
 
     revision_request: str | None = None
     knowledge_base = load_knowledge() if knowledge is None else knowledge

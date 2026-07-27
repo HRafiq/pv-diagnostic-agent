@@ -24,6 +24,7 @@ import pandas as pd
 from eval.compare import compare, comparison_table
 from eval.golden import build_golden_set, composition, load_cases, write_cases
 from eval.metrics import CaseScore, Prediction, aggregate, confusion, score_case
+from eval.progress import StepPrinter
 from eval.scenarios import materialise
 from src.agent.llm import BudgetExceeded, build_client, is_systemic_request_error
 from src.agent.loop_plain import investigate
@@ -92,6 +93,7 @@ def run_agent_engine(
     max_tools_per_cycle: int = 8,
     review: bool = True,
     use_knowledge: bool = True,
+    verbose: bool = True,
 ) -> tuple[list[CaseScore], list[Prediction]]:
     """Run the plain-Python investigation loop over the golden set.
 
@@ -122,6 +124,13 @@ def run_agent_engine(
         )
         client = build_client(load_models_config_cached(), settings.anthropic_api_key)
 
+        # A case takes minutes. Without this the run is silent until it
+        # finishes, which makes a working run indistinguishable from a hung one
+        # — and hides the fact that every case is failing the same way until
+        # the first one gives up.
+        print(f"\n  {case.id}  {case.question[:80]}", flush=True)
+        printer = StepPrinter(case_id=case.id, verbose=verbose)
+
         started = time.monotonic()
         # One case must not be able to destroy the other forty-two. An
         # investigation can die on a malformed reply, a transient API error, or
@@ -145,10 +154,12 @@ def run_agent_engine(
                 max_tools_per_cycle=max_tools_per_cycle,
                 critic=None if review else False,
                 knowledge=knowledge,
+                on_step=printer,
             )
         except BudgetExceeded:
             raise
         except Exception as exc:  # reported, then scored as a failure
+            printer.finish()
             # A malformed request is a defect here, not a bad case. Isolating it
             # per case just reproduces it once per case — which is exactly what
             # happened: forty-three identical 400s, one round trip each.
@@ -180,6 +191,7 @@ def run_agent_engine(
             )
             scores.append(score_case(case, predictions[-1]))
             continue
+        printer.finish()
         elapsed_ms = int((time.monotonic() - started) * 1000)
 
         finding = out.finding
@@ -208,9 +220,9 @@ def run_agent_engine(
         )
         scores.append(score_case(case, predictions[-1]))
         print(
-            f"  {case.id}  {len(out.tools_called)} measurements, "
+            f"  -> {case.id}  {len(out.tools_called)} measurements, "
             f"{len(out.unplanned_tools)} unplanned, "
-            f"${out.cost_usd:.3f}, "
+            f"${out.cost_usd:.3f}, {elapsed_ms / 1000:.0f}s, "
             f"{'settled' if predictions[-1].settled else 'not enough evidence'}"
         )
         if out.ungrounded_numbers:
@@ -244,6 +256,7 @@ def _run_engine(
         cases,
         review=not getattr(args, "no_review", False),
         use_knowledge=not getattr(args, "no_knowledge", False),
+        verbose=not getattr(args, "quiet", False),
     )
 
 
@@ -542,6 +555,14 @@ def main(argv: list[str] | None = None) -> int:
         "--split", default="both", choices=["tuning", "heldback", "both"]
     )
     p_run.add_argument("--confusion", action="store_true")
+    p_run.add_argument(
+        "--quiet",
+        action="store_true",
+        help=(
+            "Collapse the per-step trace to a one-line counter per case. "
+            "The run still reports what it is doing; it just says less."
+        ),
+    )
     p_run.add_argument("--out", type=str, default=None)
     p_run.add_argument(
         "--no-review",
@@ -563,6 +584,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_cmp.add_argument("--out", type=str, default=None)
     p_cmp.add_argument("--no-review", action="store_true")
+    p_cmp.add_argument("--quiet", action="store_true")
     p_cmp.add_argument("--no-knowledge", action="store_true")
     p_cmp.set_defaults(func=_cmd_compare)
 
