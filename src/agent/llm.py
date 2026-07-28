@@ -49,11 +49,54 @@ class BudgetExceeded(RuntimeError):
 
 
 # Transient failures are retried in place: an overloaded API or a dropped
-# connection is "not now", not "not ever". Three attempts with 2s/4s backoff —
-# long enough to ride out a blip, short enough that a genuinely dead network
-# fails the case in seconds rather than minutes.
-_TRANSIENT_RETRIES = 3
+# connection is "not now", not "not ever". Five attempts with 2/4/8/16s backoff
+# — about half a minute, enough to ride out a real overload episode rather than
+# a single blip, and still bounded so a dead network fails the case promptly.
+#
+# The SDK retries twice on its own before raising, so a call that reaches the
+# last attempt here has already been tried a dozen times.
+_TRANSIENT_RETRIES = 5
 _RETRY_BACKOFF_SECONDS = 2.0
+_MAX_RETRY_AFTER_SECONDS = 60.0
+
+# Retried by status code rather than by exception class. An earlier version
+# listed `(APIConnectionError, RateLimitError, InternalServerError)` and missed
+# `overloaded_error` entirely, because 529 maps to `OverloadedError`, which is a
+# *sibling* of `InternalServerError` under `APIStatusError` rather than a
+# subclass — and it is checked first, so the `>= 500` branch never sees it. A
+# run died on exactly that.
+#
+# Enumerating classes is the wrong shape for this: the SDK grows new ones
+# (`OverloadedError`, `RequestTooLargeError`) and each addition silently
+# reopens the hole. These are the codes the SDK's own retry policy uses.
+_RETRYABLE_STATUS = frozenset({408, 409, 429, 500, 502, 503, 504, 529})
+
+
+def _is_transient(exc: BaseException) -> bool:
+    """True for "not now" — worth trying the same request again."""
+    import anthropic
+
+    if isinstance(exc, anthropic.APIConnectionError):
+        return True  # includes APITimeoutError
+    if isinstance(exc, anthropic.APIStatusError):
+        code = getattr(exc, "status_code", None)
+        return code in _RETRYABLE_STATUS or (isinstance(code, int) and code >= 500)
+    return False
+
+
+def _retry_after(exc: BaseException) -> float | None:
+    """Honour the API's own backoff hint when it sends one."""
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None) or {}
+    raw = headers.get("retry-after")
+    if raw is None:
+        return None
+    try:
+        # Bounded: a server asking us to wait ten minutes should fail the case,
+        # not stall the run.
+        return min(float(raw), _MAX_RETRY_AFTER_SECONDS)
+    except (TypeError, ValueError):
+        return None
 
 
 class TruncatedReply(ValueError):
@@ -363,23 +406,21 @@ class AnthropicClient:
         identically every time, and `is_systemic_request_error` stops the whole
         run on it rather than reproducing it once per case.
         """
-        import anthropic
-
-        transient = (
-            anthropic.APIConnectionError,
-            anthropic.RateLimitError,
-            anthropic.InternalServerError,
-        )
         last: Exception | None = None
         for attempt in range(_TRANSIENT_RETRIES):
             try:
                 with self._client.messages.stream(**kwargs) as stream:
                     return stream.get_final_message()
-            except transient as exc:
+            except Exception as exc:
+                if not _is_transient(exc):
+                    raise
                 last = exc
                 if attempt == _TRANSIENT_RETRIES - 1:
                     break
-                time.sleep(_RETRY_BACKOFF_SECONDS * (2**attempt))
+                wait = _retry_after(exc)
+                time.sleep(
+                    wait if wait is not None else _RETRY_BACKOFF_SECONDS * (2**attempt)
+                )
         assert last is not None
         raise last
 

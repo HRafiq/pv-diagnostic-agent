@@ -1704,3 +1704,39 @@ is reported absent rather than zero — from after the run to before it.
 
 `--sample` is the one to reach for. `--limit 5` is honest about being a
 straight line through a sorted file, which is exactly what it is.
+
+---
+
+## 0058 — Retry by status code, not by exception class (2026-07-26)
+
+**The bug in the previous fix.** DECISION 0056 added transient-failure retries
+with a list of exception classes:
+
+```python
+transient = (APIConnectionError, RateLimitError, InternalServerError)
+```
+
+A run then died on `overloaded_error` regardless. The reason is in the SDK's
+own mapping: **529 maps to `OverloadedError`, checked *before* the `>= 500`
+branch**, and `OverloadedError` is a *sibling* of `InternalServerError` under
+`APIStatusError` — not a subclass. The retry never saw it.
+
+**The shape of the mistake, which is the point.** Enumerating classes is the
+wrong shape for "is this worth trying again". The SDK grows new ones —
+`OverloadedError` and `RequestTooLargeError` are both recent — and every
+addition silently reopens the hole, with no failing test, because the code that
+would have caught it is a list of names that still looks complete.
+
+Retryability is a property of the *response*, and the SDK's own policy is
+expressed in status codes: 408, 409, 429 and anything ≥ 500. `_is_transient`
+now checks those, plus `APIConnectionError` (which covers timeouts), and a test
+asserts an unmapped 5xx is retried too — the rule is "5xx means try again", not
+a list of blessed classes.
+
+**Also changed while here.** Retries go from three to five attempts with 2/4/8/16s
+backoff, about half a minute. Three attempts over six seconds rides out a blip;
+a real overload episode lasts longer than that, and the SDK has already retried
+twice before raising, so a call reaching the last attempt has been tried a
+dozen times. `retry-after` is honoured when the API sends one, bounded at sixty
+seconds so a server asking for ten minutes fails the case rather than stalling
+the run.
