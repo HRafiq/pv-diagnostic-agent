@@ -26,6 +26,7 @@ from src.agent.nodes.prompts import (
     tool_catalogue_text,
 )
 from src.agent.state import AgentState
+from src.knowledge import cause_vocabulary
 from src.tools import ToolResult, tool_names
 
 __all__ = ["ROUTE_SCHEMA", "RouterDecision", "route"]
@@ -118,10 +119,18 @@ ROUTE_SCHEMA: dict[str, Any] = {
         },
         "look_up_causes": {
             "type": "array",
-            "items": {"type": "string"},
+            # The knowledge base is keyed by these names, so anything else can
+            # only miss. Left as free text, the router asked it to separate
+            # "H4 and H1", and once a whole sentence — nine such lookups across
+            # eight cases, every one a paid round trip that returned
+            # "nothing known about those causes" and could not have returned
+            # anything else. The synthesiser's `cause` was closed for the same
+            # reason; this is the other half of it.
+            "items": {"type": "string", "enum": cause_vocabulary()},
             "description": (
                 "For 'look_up': the two causes to fetch the distinguishing "
-                "test for. Empty otherwise."
+                "test for, by their names above — not hypothesis ids. Empty "
+                "otherwise."
             ),
         },
         "excludes": {

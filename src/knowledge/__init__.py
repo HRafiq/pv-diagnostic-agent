@@ -30,6 +30,7 @@ __all__ = [
     "DistinguishingTest",
     "KnowledgeBase",
     "Signature",
+    "cause_vocabulary",
     "load_knowledge",
 ]
 
@@ -273,3 +274,19 @@ def load_knowledge(root: Path | None = None) -> KnowledgeBase:
         )
 
     return KnowledgeBase(signatures=signatures, tests=tuple(tests))
+
+
+def cause_vocabulary() -> list[str]:
+    """The canonical cause names every node must use for the same thing.
+
+    A *label*, not an explanation. Free text meant the same cause arrived as
+    `shading` from one node and a whole sentence from another, and anything
+    comparing them by name — scoring, retrieval, the look-alike checklist —
+    silently missed. The explanation belongs in prose fields; this says *which*
+    cause, in one spelling.
+
+    Read from the signatures rather than restated anywhere, so a cause added to
+    the knowledge base is immediately sayable by every node and no node can
+    drift from the vocabulary the agent is shown.
+    """
+    return sorted(load_knowledge().signatures)

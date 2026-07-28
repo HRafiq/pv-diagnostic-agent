@@ -1224,3 +1224,157 @@ def test_a_cycle_that_does_measure_still_replans(
 
     assert len([s for s in result.steps if s.kind == "plan"]) == 2
     assert "no new measurement" not in (result.stopped_because or "")
+
+
+# ===========================================================================
+# A review that refuses to commit must un-commit the answer
+# ===========================================================================
+def test_a_settled_answer_is_withdrawn_when_the_review_will_not_commit(
+    ctx: ToolContext, clock: FrozenClock
+) -> None:
+    """The verdict the critic exists to be able to give must actually take.
+
+    The loop already stopped on `not_enough_evidence` — and left the settled
+    draft in place, so the reviewer's refusal published the very commitment it
+    rejected. G-039's ground truth is "not decidable from this plant's
+    telemetry"; the critic said `not_enough_evidence`; the run reported
+    `settled: curtailment`.
+
+    The pre-existing test for this verdict fed the loop an *unsettled* draft,
+    so it passed throughout — which is why the bug survived to run.
+    """
+
+    def undecided(state: AgentState, results: Any, synthesis: Any) -> CriticVerdict:
+        return _verdict("not_enough_evidence", standing=["clipping", "curtailment"])
+
+    client = ScriptedClient(
+        replies={
+            "planner": [a_plan(["check_ac_ceiling"])],
+            "router": [a_call("check_ac_ceiling"), a_stop()],
+            "synthesizer": [a_settled_answer()],
+        }
+    )
+    out = investigate(
+        "q", ctx, client, clock, investigation_id="INV-WITHDRAW", critic=undecided
+    )
+
+    assert out.synthesis is not None
+    assert out.synthesis.settled is False
+    # The load-bearing part: no cause, no confidence on an unsettled answer.
+    assert out.synthesis.cause is None
+    assert out.synthesis.confidence is None
+    assert [c.cause for c in out.synthesis.candidate_causes] == [
+        "clipping",
+        "curtailment",
+    ]
+    assert out.synthesis.resolving_measurement
+    assert out.finding is not None and out.finding.settled is False
+    assert out.finding.cause is None
+    assert "insufficient to commit" in out.stopped_because
+
+
+def test_withdrawal_leaves_an_already_unsettled_answer_alone(
+    ctx: ToolContext, clock: FrozenClock
+) -> None:
+    """Nothing to withdraw. The draft's own surviving causes are kept."""
+
+    def undecided(state: AgentState, results: Any, synthesis: Any) -> CriticVerdict:
+        return _verdict("not_enough_evidence")
+
+    client = ScriptedClient(
+        replies={
+            "planner": [a_plan(["check_ac_ceiling"])],
+            "router": [a_call("check_ac_ceiling"), a_stop()],
+            "synthesizer": [an_unsettled_answer()],
+        }
+    )
+    out = investigate(
+        "q", ctx, client, clock, investigation_id="INV-NOOP", critic=undecided
+    )
+    assert out.synthesis is not None and out.synthesis.settled is False
+    assert len(out.synthesis.candidate_causes) >= 2
+
+
+def test_an_accepted_answer_is_not_withdrawn(
+    ctx: ToolContext, clock: FrozenClock
+) -> None:
+    """The withdrawal must key on the verdict, not on the loop ending."""
+
+    def happy(state: AgentState, results: Any, synthesis: Any) -> CriticVerdict:
+        return _verdict("accept", checked=_ALL_LOOKALIKES)
+
+    client = ScriptedClient(
+        replies={
+            "planner": [a_plan(["check_ac_ceiling"])],
+            "router": [a_call("check_ac_ceiling"), a_stop()],
+            "synthesizer": [a_settled_answer()],
+        }
+    )
+    out = investigate(
+        "q", ctx, client, clock, investigation_id="INV-ACCEPT", critic=happy
+    )
+    assert out.synthesis is not None and out.synthesis.settled is True
+    assert out.synthesis.cause == "string_outage"
+
+
+def test_the_ledger_keeps_every_call_of_a_repeated_tool(
+    ctx: ToolContext, clock: FrozenClock
+) -> None:
+    """A tool run twice used to erase its own earlier measurement.
+
+    The namespace was the tool name alone, so last write won. One case ran
+    `per_mppt_current_balance` four times over different windows and the six
+    figures its answer quoted from the first two were reported as fabricated —
+    the more thoroughly a case was measured, the less grounded it looked.
+    """
+    out = run(
+        [a_plan(["per_mppt_current_balance"])],
+        [
+            a_call("per_mppt_current_balance"),
+            a_call("per_mppt_current_balance", start="2017-04-10T00:00:00Z"),
+            a_stop(),
+        ],
+        [a_settled_answer()],
+        ctx,
+        clock,
+    )
+    ledger = ledger_of(out.results)
+    first = [k for k in ledger if k.startswith("per_mppt_current_balance.")]
+    second = [k for k in ledger if k.startswith("per_mppt_current_balance#2.")]
+    assert first and second, ledger
+    assert len(out.results) == 2
+
+
+def test_the_router_may_only_look_up_causes_the_knowledge_base_knows() -> None:
+    """Free text meant the router asked about hypothesis ids.
+
+    `Looked up what separates H4 and H1 — nothing known about those causes`,
+    nine times across eight cases: a paid round trip that could not have
+    returned anything, because the knowledge base is keyed by cause name. The
+    synthesiser's `cause` was closed for the same reason.
+    """
+    from src.agent.nodes.router import ROUTE_SCHEMA
+    from src.knowledge import cause_vocabulary
+
+    items = ROUTE_SCHEMA["properties"]["look_up_causes"]["items"]
+    assert items["enum"] == cause_vocabulary()
+    assert "H1" not in items["enum"]
+
+
+def test_every_node_that_reads_an_answer_may_write_as_long_as_it() -> None:
+    """A reviewer that cannot finish its reply fails the whole case.
+
+    The critic re-reads every measurement, the draft and the look-alike
+    checklist, then writes an exclusion with reasoning for each — at
+    effort='high' that can outrun what the draft cost to produce. Its ceiling
+    was below the synthesiser's, it truncated mid-reply, and the case it took
+    down was one the agent had answered correctly twice.
+    """
+    from src.config import load_models_config
+
+    config = load_models_config()
+    for name, profile in config.profiles.items():
+        assert profile["critic"].max_tokens >= profile["synthesizer"].max_tokens, (
+            f"profile {name}: the critic reads the synthesiser's whole output "
+            "and must be able to write at least as much"
+        )

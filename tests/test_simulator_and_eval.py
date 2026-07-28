@@ -471,3 +471,115 @@ def test_rules_engine_runs_a_fixed_check_sequence() -> None:
     # Same checks regardless of what the data showed — the definition of a
     # pipeline, and the thing the agency metrics are built to detect.
     assert a.checks_run[: len(b.checks_run)] == b.checks_run[: len(a.checks_run)]
+
+
+# ===========================================================================
+# Agency metrics must not take credit for infrastructure failures
+# ===========================================================================
+def test_a_crashed_case_is_not_counted_as_a_chosen_abstention() -> None:
+    """`not p.settled` was the whole test, so a 529 read as the agent deciding.
+
+    An eight-case run with three API failures reported
+    `self_initiated_abstentions: 5` when the agent had chosen twice. The failed
+    cases still score as unsettled — that is what they produced — but agency is
+    about what the agent *did*, and it did not do these.
+    """
+    ran = [
+        Prediction(case_id="A", category="fault", cause="string_outage", settled=True),
+        Prediction(case_id="B", category=None, cause=None, settled=False),
+    ]
+    crashed = [
+        Prediction(
+            case_id="C",
+            category=None,
+            cause=None,
+            settled=False,
+            failed_with="APIStatusError: overloaded_error",
+        )
+    ]
+    agency = measure_agency([*ran, *crashed])
+
+    assert agency["self_initiated_abstentions"] == 1
+    assert agency["runs"] == 3
+    assert agency["completed_runs"] == 2
+    # Not hidden — a reader must see how much of the sample survived.
+    assert agency["failed_runs"] == 1
+
+
+def test_a_crash_does_not_drag_the_cost_and_tool_averages_down() -> None:
+    """A crash contributes zero tools and zero cost. Averaging it in flatters."""
+    real = [
+        Prediction(
+            case_id=f"R{n}",
+            category="fault",
+            cause="string_outage",
+            settled=True,
+            tools_called=("compute_pr", "check_ac_ceiling"),
+            cost_usd=1.0,
+        )
+        for n in range(2)
+    ]
+    crashed = [
+        Prediction(
+            case_id="X",
+            category=None,
+            cause=None,
+            settled=False,
+            failed_with="TruncatedReply: critic hit its cap",
+        )
+    ]
+    agency = measure_agency([*real, *crashed])
+    assert agency["mean_tools_per_run"] == 2.0
+    assert agency["median_cost_usd"] == 1.0
+
+
+def test_every_case_failing_says_so_rather_than_reporting_zeros() -> None:
+    agency = measure_agency(
+        [
+            Prediction(
+                case_id="X",
+                category=None,
+                cause=None,
+                settled=False,
+                failed_with="APIStatusError: overloaded_error",
+            )
+        ]
+    )
+    assert agency["completed_runs"] == 0
+    assert "nothing to measure" in agency["note"]
+
+
+# ===========================================================================
+# A target that was never assessed is not a target that was missed
+# ===========================================================================
+def test_targets_are_not_measured_when_the_held_back_split_was_not_run() -> None:
+    """A tuning-only run printed four FAILs it was in no position to assess.
+
+    The same screen showed `false alarms 0.000` and
+    `FAIL false_alarm_rate_at_most_0.15`. Both lines were computed correctly and
+    together they said nothing true.
+    """
+    scores = [score_case(_case(split="tuning"), _pred())]
+    report = aggregate(scores)
+    targets = report.meets_v1_targets()
+
+    assert set(targets) == {
+        "macro_f1_at_least_0.75",
+        "false_alarm_rate_at_most_0.15",
+        "correct_abstention_at_least_0.70",
+        "overfitting_gap_at_most_0.10",
+    }
+    assert all(value is None for value in targets.values()), targets
+
+
+def test_a_held_back_split_that_was_run_is_still_judged() -> None:
+    """Not-measured must not become a way to avoid ever failing."""
+    scores = [
+        score_case(_case(split="heldback"), _pred(category="by_design", cause=None))
+    ]
+    targets = aggregate(scores).meets_v1_targets()
+    assert targets["macro_f1_at_least_0.75"] is False
+    # No look-alikes in the split, so that bar is missed rather than unmeasured.
+    assert targets["false_alarm_rate_at_most_0.15"] is False
+    # But the gap genuinely needs both splits.
+    assert targets["overfitting_gap_at_most_0.10"] is None

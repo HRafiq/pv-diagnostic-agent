@@ -45,7 +45,14 @@ from src.agent.loop_plain import (
     _build_finding,
     _verdict_in_plain_words,
 )
-from src.agent.nodes import RouterDecision, execute, plan, route, synthesize
+from src.agent.nodes import (
+    RouterDecision,
+    execute,
+    plan,
+    route,
+    synthesize,
+    withdraw_commitment,
+)
 from src.agent.nodes.critic import review as run_review
 from src.agent.nodes.prompts import plant_brief
 from src.agent.state import AgentState
@@ -384,6 +391,16 @@ def build_graph(run: _Run) -> Any:
         if verdict.verdict == "send_back":
             state.cycle += 1
             run.revision_request = verdict.revision_request
+        elif verdict.verdict == "not_enough_evidence" and run.out.synthesis is not None:
+            # Mirrors the plain loop: a review that refuses to commit must not
+            # leave the committed draft standing as the published answer.
+            run.out.synthesis = withdraw_commitment(
+                run.out.synthesis, list(verdict.hypotheses_still_standing), state
+            )
+            state.settled = False
+            run.out.stopped_because = (
+                "the review found the evidence insufficient to commit"
+            )
         return state
 
     # ---------------- conditional edges --------------------------------

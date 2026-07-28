@@ -201,6 +201,10 @@ def run_agent_engine(
                     critic_cycles=0,
                     cost_usd=0.0,
                     latency_ms=elapsed_ms,
+                    # Scored as unsettled, which is what it was — but marked,
+                    # so the agency metrics do not report a 529 as the agent
+                    # choosing to abstain.
+                    failed_with=f"{type(exc).__name__}: {exc}",
                 )
             )
             scores.append(score_case(case, predictions[-1]))
@@ -574,9 +578,16 @@ def _cmd_run(args: argparse.Namespace) -> int:
     for key, value in report.agency.items():
         print(f"    {key:<32} {value}")
 
+    targets = report.meets_v1_targets()
     print("\n  v1 targets (held-back split)")
-    for name, passed in report.meets_v1_targets().items():
-        print(f"    {'PASS' if passed else 'FAIL'}  {name}")
+    for name, passed in targets.items():
+        # Three-valued. "not measured" is not a failure, and printing it as one
+        # made a tuning-only run look like four missed targets it was never in
+        # a position to assess.
+        label = "n/a " if passed is None else ("PASS" if passed else "FAIL")
+        print(f"    {label}  {name}")
+    if all(passed is None for passed in targets.values()):
+        print("    (the held-back split was not run, so none of these were assessed)")
 
     if args.confusion:
         print("\n  truth (rows) vs predicted (columns)")

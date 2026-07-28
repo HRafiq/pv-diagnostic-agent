@@ -1827,3 +1827,145 @@ them: unsupported figure, then unweighed look-alike, then the reviewer's prose.
 This is a view, not a measurement — `eval/progress.py`, not `src/` — and it
 stays inside the existing guarantee that a display failure cannot take down a
 paid run.
+
+---
+
+## 0061 — A review that will not commit must un-commit the answer (2026-07-28)
+
+**The failure.** G-039's ground truth is that the question is *not decidable*
+from this plant's telemetry: a ceiling at 185 kW against a 260 kW inverter is
+clipping or curtailment, and the golden case says "committing is wrong either
+way". The run reads:
+
+```
+[G-039] answer  settled: curtailment
+[G-039] review  not_enough_evidence
+-> G-039 ... settled
+```
+
+The critic got it right. The loop published the commitment anyway.
+
+**The bug.** `loop_plain.py` treated the verdict as a *stop* signal only:
+
+```python
+if verdict.verdict in ("accept", "not_enough_evidence"):
+    break
+```
+
+Stopping was correct. Leaving `out.synthesis` settled was not — the reviewer's
+refusal ended the investigation and shipped the very answer it rejected. The
+one guarantee the critic exists to provide was inverted by the code consuming
+it, and `correct_abstention_rate: 0.0` on the only unresolvable case in the
+sample is entirely this.
+
+**Why no test caught it.** `test_not_enough_evidence_ends_the_loop_as_a_success`
+existed and passed. It fed the loop an **unsettled** draft, so there was nothing
+to withdraw and the missing withdrawal was invisible. The test asserted the
+loop's cheap property (it stops) and never the expensive one (what it publishes).
+The new test uses a settled draft and fails against the old code with
+`settled=True, cause='string_outage'` — which is the bug, printed.
+
+**The fix.** `withdraw_commitment` rebuilds the draft as the abstention the
+review asked for: cause and confidence stripped before `Finding` construction
+(the same order `synthesize` already uses), surviving causes taken from the
+critic's `hypotheses_still_standing`, and their operational consequence and the
+resolving measurement read from the hypotheses the *planner* wrote. Re-deriving
+those here would be a second opinion about work already done.
+
+Mirrored into `loop_graph.py` with an equivalence test, because a behaviour that
+lives in only one loop is the same bug waiting in the half nobody reads.
+
+---
+
+## 0062 — The ledger namespaces by call, not by tool (2026-07-28)
+
+`ledger_of` keyed on `f"{result.tool}.{key}"`, so a tool run twice silently
+overwrote its own earlier measurements. That is not a rare path — re-running a
+measurement on a narrower window is the router's whole job. One case ran
+`per_mppt_current_balance` four times over different windows, keeping only the
+fourth, and the six figures its answer quoted from the first two were reported
+as fabricated.
+
+The shape of the failure is the worst available: it makes the *most* thoroughly
+measured investigations look the least grounded, and since `unsupported_claims`
+is a hard veto (DECISION 0057), the punishment for measuring twice was a
+rejected answer. This is also the mechanism behind the `-3.53642` / `6.90082`
+figures in DECISION 0059 that the quotation fix covered without explaining.
+
+Repeat calls now get a `#2`, `#3` suffix. Keys are provenance labels and are
+never parsed, so the shape is free to say which call a figure came from.
+
+---
+
+## 0063 — The critic may write as much as the synthesiser (2026-07-28)
+
+`TruncatedReply: critic hit its 16000-token cap` failed a whole case — G-006,
+which the agent had answered **correctly, twice**. The critic re-reads every
+measurement, the draft and the look-alike checklist, then writes an exclusion
+with reasoning for each; at `effort=high` its thinking alone can outrun what the
+draft cost to produce. DECISION 0055 raised the synthesiser to 32000 and left
+the critic at 16000, which put the ceiling on the wrong node — the one that
+*reads* the long output was capped below the one that writes it.
+
+Both profiles now give the critic the synthesiser's ceiling, and a test asserts
+the relation rather than the number, so the next person to raise one is made to
+raise the other.
+
+---
+
+## 0064 — The router may only look up causes that exist (2026-07-28)
+
+`look_up_causes` was `{"type": "string"}`. The router used it to ask what
+separates "H4 and H1", and once a whole sentence. The knowledge base is keyed by
+cause name, so those lookups could not have matched anything — nine of them
+across eight cases, each a paid round trip returning "nothing known about those
+causes".
+
+DECISION 0053 closed the synthesiser's `cause` to a vocabulary for exactly this
+reason and stopped there. This is the other half. The vocabulary itself moved to
+`src.knowledge.cause_vocabulary()`, since the router needing it made reaching it
+through the synthesiser look like a synthesiser question when it is a knowledge
+question.
+
+---
+
+## 0065 — A crash is not an abstention, and an unrun target is not a failure
+(2026-07-28)
+
+Two reporting bugs, one shape: the evaluation claiming to know things it had not
+measured.
+
+**Agency counted crashes as choices.** `self_initiated_abstentions` was
+`sum(1 for p in predictions if not p.settled)`. A case that died on a 529 scores
+as unsettled — correctly, that is what it produced — and was then reported as
+the agent *deciding* to abstain. Eight cases with three API failures reported
+five self-initiated abstentions when the agent had chosen twice. The same
+contamination ran through every agency number: a crash contributes an empty
+trajectory, zero tools, zero cost and zero cycles, all of which flatter.
+
+`Prediction.failed_with` now marks a case that never produced an answer.
+Scoring is unchanged — the failures stay in the denominator, because dropping
+them would flatter the engine by removing its failures. Agency is measured over
+the runs that ran, with `completed_runs` and `failed_runs` reported beside it so
+a reader can see how much of the sample survived.
+
+**Targets reported FAIL for never-assessed.** `meets_v1_targets` read
+`by_split["heldback"]`, which is `{}` on a tuning-only run, so
+`float(None or 0.0) >= 0.75` came out False four times. A debugging run printed
+`false alarms 0.000` and `FAIL false_alarm_rate_at_most_0.15` on the same
+screen. Both lines were computed correctly and together they said nothing true.
+
+The method is three-valued now: met, missed, **not measured**. The distinction
+it protects is real and survives — a split that *was* run but holds no
+look-alikes still **fails** the false-alarm bar, because you do not clear a bar
+by bringing no evidence to it. A split that was never run has not been assessed,
+and calling that a failure is the same category error pointing the other way.
+`eval/metrics.py` already omits a metric with no cases behind it; the targets
+block now obeys its own rule.
+
+**What the eight-case run actually measured.** Three of eight cases died on
+infrastructure. Of the six that answered, every one had the right answer
+somewhere in its trace and two survived to be scored. macro-F1 0.213 is not a
+measurement of diagnostic ability; it is a measurement of the loop's ability to
+keep an answer it already had. That is worth writing down because the number
+looks like the former and would have been quoted as it.

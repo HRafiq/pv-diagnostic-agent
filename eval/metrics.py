@@ -39,6 +39,16 @@ class Prediction:
     critic_cycles: int = 0
     cost_usd: float = 0.0
     latency_ms: int = 0
+    # Set when the case never produced an answer — an API failure, a truncated
+    # reply, an unhandled error. It still scores as unsettled, because that is
+    # what it was; but it is not something the agent *chose*, and the agency
+    # metrics must not read it as one.
+    failed_with: str | None = None
+
+    @property
+    def abstained(self) -> bool:
+        """Declined to commit, having actually run."""
+        return not self.settled and self.failed_with is None
 
 
 @dataclass(frozen=True)
@@ -165,9 +175,41 @@ class EvaluationReport:
             return None
         return round(float(tuning) - float(held), 4)
 
-    def meets_v1_targets(self) -> dict[str, bool]:
-        """The §5.6 success criteria, evaluated on the held-back split."""
-        held = self.by_split.get("heldback", {})
+    def meets_v1_targets(self) -> dict[str, bool | None]:
+        """The §5.6 success criteria, evaluated on the held-back split.
+
+        Three-valued on purpose: `True` met, `False` missed, **`None` not
+        measured**. The distinction is the whole point of the method.
+
+        It used to be two-valued, and a run of the tuning split alone therefore
+        printed four FAILs — because `by_split["heldback"]` was `{}` and
+        `float(None or 0.0) >= 0.75` is False. A debugging run of eight cases
+        reported `false alarms 0.000` and `FAIL false_alarm_rate_at_most_0.15`
+        on the same screen. Both lines were produced correctly and together they
+        said nothing true.
+
+        There is a real distinction underneath, and it survives:
+
+        * a split that *was* run but contains no look-alikes cannot demonstrate
+          a low false-alarm rate, so that target is **missed** — you do not
+          clear a bar by bringing no evidence to it;
+        * a split that was never run has not been assessed at all, and calling
+          that a failure is the same category error in the other direction.
+
+        `eval/metrics.py` already omits a metric with no cases behind it rather
+        than printing zero. This makes the targets block obey its own rule.
+        """
+        if "heldback" not in self.by_split:
+            return dict.fromkeys(
+                (
+                    "macro_f1_at_least_0.75",
+                    "false_alarm_rate_at_most_0.15",
+                    "correct_abstention_at_least_0.70",
+                    "overfitting_gap_at_most_0.10",
+                )
+            )
+
+        held = self.by_split["heldback"]
         gap = self.overfitting_gap
         far = held.get("false_alarm_rate")
         abstention = held.get("correct_abstention_rate")
@@ -178,7 +220,9 @@ class EvaluationReport:
             "false_alarm_rate_at_most_0.15": far is not None and float(far) <= 0.15,
             "correct_abstention_at_least_0.70": abstention is not None
             and float(abstention) >= 0.70,
-            "overfitting_gap_at_most_0.10": gap is not None and abs(gap) <= 0.10,
+            # The gap needs both splits. Running only the held-back one leaves
+            # it unmeasured rather than failed.
+            "overfitting_gap_at_most_0.10": (None if gap is None else abs(gap) <= 0.10),
         }
 
     def to_dict(self) -> dict[str, Any]:
@@ -247,30 +291,53 @@ def measure_agency(predictions: list[Prediction]) -> dict[str, Any]:
 
     The unplanned-measurement rate is the sharpest single indicator. Near zero
     means the planner is a sequencer and the "agent" is a pipeline that narrates.
+
+    **Measured over the runs that actually ran.** A case that died on an API
+    error is scored as unsettled — correctly, that is what it produced — but it
+    is not evidence about agency, and averaging it in corrupts every number
+    here in the flattering direction. A crash contributes an empty trajectory,
+    zero tools, zero cost and zero cycles; eight cases with three crashes
+    reported `self_initiated_abstentions: 5` when the agent had chosen to
+    abstain twice. An agency metric taking credit for a 529 is the exact
+    self-flattery this module exists to refuse.
+
+    Failures are not hidden — `failed_runs` is reported beside `completed_runs`,
+    so a reader can see how much of the sample survived to be measured.
     """
     if not predictions:
         return {}
 
-    trajectories = Counter(tuple(p.tools_called) for p in predictions)
-    with_unplanned = sum(1 for p in predictions if p.unplanned_tools)
-    cycles = Counter(p.critic_cycles for p in predictions)
-    costs = sorted(p.cost_usd for p in predictions)
-    latencies = sorted(p.latency_ms for p in predictions)
+    ran = [p for p in predictions if p.failed_with is None]
+    if not ran:
+        return {
+            "runs": len(predictions),
+            "completed_runs": 0,
+            "failed_runs": len(predictions),
+            "note": "every case failed before answering; nothing to measure",
+        }
+
+    trajectories = Counter(tuple(p.tools_called) for p in ran)
+    with_unplanned = sum(1 for p in ran if p.unplanned_tools)
+    cycles = Counter(p.critic_cycles for p in ran)
+    costs = sorted(p.cost_usd for p in ran)
+    latencies = sorted(p.latency_ms for p in ran)
 
     def median(values: list[Any]) -> Any:
         return values[len(values) // 2] if values else 0
 
     return {
         "runs": len(predictions),
+        "completed_runs": len(ran),
+        "failed_runs": len(predictions) - len(ran),
         # > 15 of 64 in the brief's target; below that it is a pipeline.
         "distinct_tool_trajectories": len(trajectories),
-        "unplanned_measurement_rate": round(with_unplanned / len(predictions), 4),
+        "unplanned_measurement_rate": round(with_unplanned / len(ran), 4),
         "iteration_distribution": dict(sorted(cycles.items())),
-        "self_initiated_abstentions": sum(1 for p in predictions if not p.settled),
+        "self_initiated_abstentions": sum(1 for p in ran if p.abstained),
         "median_cost_usd": round(median(costs), 4),
         "median_latency_ms": median(latencies),
         "mean_tools_per_run": round(
-            sum(len(p.tools_called) for p in predictions) / len(predictions), 2
+            sum(len(p.tools_called) for p in ran) / len(ran), 2
         ),
     }
 

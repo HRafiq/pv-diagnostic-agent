@@ -14,6 +14,7 @@ from src.agent.nodes.synthesizer import (
     Synthesis,
     ledger_of,
     synthesize,
+    withdraw_commitment,
 )
 
 __all__ = [
@@ -29,4 +30,5 @@ __all__ = [
     "plan",
     "route",
     "synthesize",
+    "withdraw_commitment",
 ]

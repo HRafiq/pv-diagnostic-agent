@@ -35,6 +35,7 @@ from src.agent.nodes import (
     plan,
     route,
     synthesize,
+    withdraw_commitment,
 )
 from src.agent.nodes.critic import review as run_review
 from src.agent.nodes.prompts import plant_brief
@@ -493,7 +494,21 @@ def investigate(
                     was_planned=True,
                 )
             )
-            if verdict.verdict in ("accept", "not_enough_evidence"):
+            if verdict.verdict == "not_enough_evidence":
+                # The reviewer looked at a committed answer and judged the
+                # evidence insufficient to commit. Stopping here was already
+                # right; leaving the settled draft in place was not, and it
+                # published the exact commitment the review rejected.
+                synthesis = withdraw_commitment(
+                    synthesis, list(verdict.hypotheses_still_standing), state
+                )
+                out.synthesis = synthesis
+                state.settled = False
+                out.stopped_because = (
+                    "the review found the evidence insufficient to commit"
+                )
+                break
+            if verdict.verdict == "accept":
                 break
 
             # A send_back is only worth acting on if the next cycle could

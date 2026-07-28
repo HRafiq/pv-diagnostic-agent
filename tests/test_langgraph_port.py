@@ -299,6 +299,36 @@ def test_not_enough_evidence_ends_both_loops(
     assert tape(plain) == tape(graph)
 
 
+def test_a_settled_answer_is_withdrawn_identically_in_both_loops(
+    ctx: ToolContext, clock: FrozenClock
+) -> None:
+    """The withdrawal is behaviour, not bookkeeping, so the port must share it.
+
+    The plain loop is the specification. A review that refuses to commit has to
+    un-commit the answer in both, or the graph would publish a cause the critic
+    rejected — the exact bug, reintroduced in the half nobody was reading.
+    """
+
+    def undecided(state: AgentState, results: Any, synth: Any) -> CriticVerdict:
+        return _verdict("not_enough_evidence", standing=["clipping", "curtailment"])
+
+    plain, graph = both(
+        ctx,
+        clock,
+        plans=[a_plan(["check_ac_ceiling"])],
+        routes=[a_call("check_ac_ceiling"), a_stop()],
+        answers=[a_settled_answer()],
+        critic=undecided,
+    )
+    for out in (plain, graph):
+        assert out.synthesis is not None
+        assert out.synthesis.settled is False
+        assert out.synthesis.cause is None
+        assert out.finding is not None and out.finding.cause is None
+    assert tape(plain) == tape(graph)
+    assert plain.stopped_because == graph.stopped_because
+
+
 # ===========================================================================
 # The graph itself
 # ===========================================================================

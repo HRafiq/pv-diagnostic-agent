@@ -15,7 +15,7 @@ validator would be the same dishonesty in the other direction.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any
 
@@ -34,7 +34,13 @@ from src.agent.state import AgentState
 from src.findings.models import CandidateCause, Finding
 from src.tools import ToolResult
 
-__all__ = ["SYNTHESIS_SCHEMA", "Synthesis", "ledger_of", "synthesize"]
+__all__ = [
+    "SYNTHESIS_SCHEMA",
+    "Synthesis",
+    "ledger_of",
+    "synthesize",
+    "withdraw_commitment",
+]
 
 _CATEGORIES = ["fault", "recoverable", "by_design", "not_the_plant"]
 
@@ -54,12 +60,13 @@ def _cause_vocabulary() -> list[str]:
     free text and are where the reasoning belongs. This field says *which*
     cause, in the same words for both engines.
 
-    Read from the knowledge base rather than restated here so the vocabulary
-    cannot drift from the signatures the agent is shown.
+    The list itself now lives in `src.knowledge`, because the router needs the
+    same one and reaching it through the synthesiser would have made a
+    vocabulary question look like a synthesiser question.
     """
-    from src.knowledge import load_knowledge
+    from src.knowledge import cause_vocabulary
 
-    return sorted(load_knowledge().signatures)
+    return cause_vocabulary()
 
 
 CAUSE_VOCABULARY = _cause_vocabulary()
@@ -223,11 +230,31 @@ class Synthesis:
 
 
 def ledger_of(results: list[ToolResult]) -> dict[str, float]:
-    """The union of every tool's provenance ledger, namespaced by tool."""
+    """The union of every tool's provenance ledger, namespaced by tool *call*.
+
+    The namespace used to be the tool name alone, so a tool run twice silently
+    overwrote its own earlier measurements — last write wins, and everything
+    before it left the ledger. That is not a rare path: the router re-runs a
+    measurement on a narrower window all the time, which is the whole point of
+    it. One case ran `per_mppt_current_balance` four times over different
+    windows, keeping only the fourth, and the six figures the answer quoted from
+    the first two were reported as fabricated.
+
+    The failure is the worst shape available: it makes the *most* thoroughly
+    measured investigations look the least grounded, and `unsupported_claims` is
+    a hard veto, so the punishment for measuring twice was a rejected answer.
+
+    Repeat calls now get a `#2`, `#3` suffix. Keys are provenance labels, never
+    parsed, so the shape is free to say which call a figure came from.
+    """
     ledger: dict[str, float] = {}
+    seen: dict[str, int] = {}
     for result in results:
+        seen[result.tool] = seen.get(result.tool, 0) + 1
+        nth = seen[result.tool]
+        prefix = result.tool if nth == 1 else f"{result.tool}#{nth}"
         for key, value in result.values.items():
-            ledger[f"{result.tool}.{key}"] = value
+            ledger[f"{prefix}.{key}"] = value
     return ledger
 
 
@@ -344,5 +371,91 @@ def synthesize(
         grounding=grounding,
         citable=citable,
         response=response,
+        build_error=build_error,
+    )
+
+
+def withdraw_commitment(
+    synthesis: Synthesis,
+    still_standing: list[str],
+    state: AgentState,
+) -> Synthesis:
+    """Rebuild a settled draft as the abstention the reviewer asked for.
+
+    The critic has three verdicts and `not_enough_evidence` is one of them: it
+    means the reviewer looked at a committed answer and judged that the evidence
+    does not support committing. The loop honoured that by *stopping*, and left
+    the settled draft in place — so the reviewer's refusal ended the
+    investigation and published the very commitment it rejected.
+
+    That is not a scoring detail. G-039 is a case whose ground truth is "not
+    decidable from this plant's telemetry, so committing is wrong either way".
+    The critic said `not_enough_evidence`. The run reported
+    `settled: curtailment`. The one guarantee the critic exists to provide was
+    inverted by the code that consumed it.
+
+    `Finding` already refuses to hold a cause on an unsettled answer, so the
+    strip has to happen here, before construction — the same order `synthesize`
+    uses when the model's own answer is unsettled.
+
+    Args:
+        still_standing: The causes the critic said survived. It guarantees at
+            least two of these before it may return `not_enough_evidence`.
+        state: Consulted for what each surviving cause would cost to act on and
+            for the measurement that would separate them. The hypotheses were
+            written when the investigation was planned; re-deriving them here
+            would be a second opinion about work already done.
+    """
+    if not synthesis.settled:
+        return synthesis
+
+    by_cause = {h.cause: h for h in state.hypotheses}
+    by_id = {h.id: h for h in state.hypotheses}
+
+    candidates: list[CandidateCause] = []
+    for name in still_standing:
+        hypothesis = by_cause.get(name) or by_id.get(name)
+        candidates.append(
+            CandidateCause(
+                cause=hypothesis.cause if hypothesis else name,
+                consequence_if_true=(
+                    hypothesis.consequence_if_true
+                    if hypothesis and hypothesis.consequence_if_true
+                    else "not established by this investigation"
+                ),
+            )
+        )
+
+    # What would separate them, in the words of whoever planned the test.
+    resolving = synthesis.resolving_measurement
+    if not resolving:
+        for name in still_standing:
+            hypothesis = by_cause.get(name) or by_id.get(name)
+            if hypothesis and hypothesis.discriminating_measurements:
+                resolving = hypothesis.discriminating_measurements[0]
+                break
+    if not resolving:
+        resolving = (
+            "a measurement that separates "
+            + " from ".join(c.cause for c in candidates[:2])
+            + "; the review did not name one"
+        )
+
+    build_error = (
+        None
+        if len(candidates) >= 2
+        else (
+            "the review declined to commit but the answer could not be rebuilt "
+            "with two surviving causes"
+        )
+    )
+
+    return replace(
+        synthesis,
+        settled=False,
+        cause=None,
+        confidence=None,
+        candidate_causes=candidates,
+        resolving_measurement=resolving,
         build_error=build_error,
     )
