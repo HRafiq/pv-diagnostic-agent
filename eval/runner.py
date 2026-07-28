@@ -26,12 +26,14 @@ from eval.golden import build_golden_set, composition, load_cases, write_cases
 from eval.metrics import CaseScore, Prediction, aggregate, confusion, score_case
 from eval.progress import StepPrinter
 from eval.scenarios import materialise
+from eval.subset import describe, select, warn_about
 from src.agent.llm import BudgetExceeded, build_client, is_systemic_request_error
 from src.agent.loop_plain import investigate
 from src.baseline.rules import RulesEngine
 from src.config import REPO_ROOT, Settings, build_clock
 from src.data.plant import load_plant
 from src.data.sources import SystemMetadata
+from src.determinism import DEFAULT_SEED
 from src.knowledge import KnowledgeBase
 from src.physics.modelchain import module_gamma_pdc
 
@@ -311,6 +313,8 @@ def _cmd_compare(args: argparse.Namespace) -> int:
         print(exc)
         return 1
 
+    cases = _apply_subset(cases, args)
+
     try:
         _check_the_record_covers_every_case(cases)
     except (RecordTooShort, FileNotFoundError) as exc:
@@ -359,6 +363,8 @@ def _cmd_experiments(args: argparse.Namespace) -> int:
     except FileNotFoundError as exc:
         print(exc)
         return 1
+
+    cases = _apply_subset(cases, args)
 
     try:
         _check_the_record_covers_every_case(cases)
@@ -452,6 +458,22 @@ def _cmd_build(args: argparse.Namespace) -> int:
     return 0
 
 
+def _apply_subset(cases: list[Any], args: argparse.Namespace) -> list[Any]:
+    """Narrow the case list, and say what the narrowing costs."""
+    chosen = select(
+        cases,
+        only=getattr(args, "only_cases", None),
+        limit=getattr(args, "limit", None),
+        sample=getattr(args, "sample", None),
+        seed=getattr(args, "seed", DEFAULT_SEED),
+    )
+    print(f"\n  {describe(chosen)}")
+    warning = warn_about(chosen, cases)
+    if warning:
+        print("\n  " + warning.replace("\n", "\n  ") + "\n")
+    return chosen
+
+
 class RecordTooShort(RuntimeError):
     """The ingested record does not cover every golden-case window."""
 
@@ -507,6 +529,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
             print(f"missing {paths[split]}; run `python -m eval.runner build` first")
             return 1
         cases.extend(load_cases(paths[split]))
+
+    cases = _apply_subset(cases, args)
 
     try:
         _check_the_record_covers_every_case(cases)
@@ -572,11 +596,59 @@ def main(argv: list[str] | None = None) -> int:
     p_build.add_argument("--system", type=int, default=4902)
     p_build.set_defaults(func=_cmd_build)
 
+    def add_subset_args(
+        target: argparse.ArgumentParser, include_only: bool = True
+    ) -> None:
+        """Run part of the split. Every command that runs cases accepts these.
+
+        A subset is for debugging, not for scoring — the harness prints which
+        metrics the chosen subset cannot support, above the results rather than
+        below them.
+        """
+        target.add_argument(
+            "--sample",
+            type=int,
+            default=None,
+            metavar="N",
+            help=(
+                "Run N cases drawn stratified by category and settledness, so "
+                "a small run still contains look-alikes and unresolvable cases "
+                "in roughly the split's proportions. Prefer this to --limit."
+            ),
+        )
+        target.add_argument(
+            "--limit",
+            type=int,
+            default=None,
+            metavar="N",
+            help=(
+                "Run the first N cases in file order. The file is grouped by "
+                "fault type, so these are not a cross-section."
+            ),
+        )
+        if include_only:
+            # `experiments` already spends --only on ablation configurations.
+            target.add_argument(
+                "--only",
+                dest="only_cases",
+                type=str,
+                default=None,
+                metavar="IDS",
+                help="Run exactly these cases, e.g. --only G-001,G-007.",
+            )
+        target.add_argument(
+            "--seed",
+            type=int,
+            default=DEFAULT_SEED,
+            help="Fixes --sample, so two runs draw the same cases.",
+        )
+
     p_run = sub.add_parser("run", help="Score a diagnostic over the golden set.")
     p_run.add_argument("--engine", default="rules", choices=["rules", "agent"])
     p_run.add_argument(
         "--split", default="both", choices=["tuning", "heldback", "both"]
     )
+    add_subset_args(p_run)
     p_run.add_argument("--confusion", action="store_true")
     p_run.add_argument(
         "--quiet",
@@ -606,6 +678,7 @@ def main(argv: list[str] | None = None) -> int:
         "--split", default="heldback", choices=["tuning", "heldback", "both"]
     )
     p_cmp.add_argument("--out", type=str, default=None)
+    add_subset_args(p_cmp)
     p_cmp.add_argument("--no-review", action="store_true")
     p_cmp.add_argument("--quiet", action="store_true")
     p_cmp.add_argument("--no-knowledge", action="store_true")
@@ -631,6 +704,7 @@ def main(argv: list[str] | None = None) -> int:
     p_exp.add_argument(
         "--only", nargs="*", default=None, help="Subset of configurations to run."
     )
+    add_subset_args(p_exp, include_only=False)
     p_exp.add_argument("--out", type=str, default=None)
     p_exp.set_defaults(func=_cmd_experiments)
 

@@ -121,9 +121,22 @@ uvicorn dashboard.app:app --reload                 # http://127.0.0.1:8000
 ```bash
 cp .env.example .env                               # add ANTHROPIC_API_KEY
 python -m eval.runner run --engine agent --split tuning
-uv run python -m eval.runner run --engine agent --split tuning --quiet
+python -m eval.runner run --engine agent --split tuning --quiet
 python -m eval.runner compare --split heldback     # rules vs agent
 python -m eval.runner experiments --runs 3         # both ablations, mean ± spread
+```
+
+**Iterating? Run a subset.** `--sample 8` draws eight cases stratified by
+category and settledness, so a small run still contains look-alikes and
+unresolvable cases and every headline metric stays computable. `--only
+G-001,G-007` runs exactly two. `--limit 5` takes the first five, which the file
+orders by fault type — so it is not a cross-section, and the harness says so.
+
+Any subset prints, above the results, which metrics it cannot support:
+
+```
+SUBSET: 5 of 43 cases. This is a debugging run, not a score — do not quote these numbers.
+  - no unresolvable cases, so correct 'not enough evidence' cannot be measured at all
 ```
 
 A full `compare --split both` is 86 investigations at roughly $0.15 each, and

@@ -1666,3 +1666,41 @@ the whole run on it instead (DECISION 0048).
 what completed and what remains. One case can legitimately die on its own
 content; three in a row *after* the client's retries is the environment, and
 continuing burns the case list for nothing.
+
+---
+
+## 0057 — Subsets are supported, and labelled (2026-07-26)
+
+**The problem.** 43 cases at a few minutes and roughly a dollar each is the
+right price for a *result* and the wrong price for "did the critic fix work?",
+which two cases answer. Iterating on the full split also means every network
+blip costs the whole run — four runs died that way.
+
+**The trap.** The obvious subset is "the first five", and the golden set is
+ordered by fault type. The first five are three faults, one recoverable and one
+by-design: **no unresolvable cases and no `not_the_plant`**. So
+`correct_abstention_rate` cannot be measured at all, macro-F1 averages over
+three classes instead of four, and neither number is comparable to the rules
+baseline's — while both still print, looking exactly like a score.
+
+**Decision.** Three ways to narrow, and a sentence saying what each costs.
+
+- `--sample N` draws **stratified by category and settledness**, with a
+  largest-remainder allocation and a floor of one per stratum so the single
+  `by_design` case in forty-three cannot round away and take its share of
+  macro-F1 with it. Eight cases keep all four categories, four look-alikes and
+  one unresolvable — every headline metric stays computable. Seeded, so two
+  runs draw the same cases and are comparable.
+- `--only G-001,G-007` runs exactly those, for debugging one thing. An unknown
+  id is an error: silently running forty-two cases when one was asked for is
+  worse than a stack trace.
+- `--limit N` takes the first N. Cheap, deterministic, and not a cross-section.
+
+**The half that makes the other half safe.** Every subset prints, *above* the
+results, which metrics it cannot support and that it is not a score. Above,
+because a number is quoted far more often than the paragraph under it. This
+extends the rule already in `eval/metrics.py` — a metric with no cases behind it
+is reported absent rather than zero — from after the run to before it.
+
+`--sample` is the one to reach for. `--limit 5` is honest about being a
+straight line through a sorted file, which is exactly what it is.
