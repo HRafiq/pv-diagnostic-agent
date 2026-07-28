@@ -37,10 +37,12 @@ from src.agent.nodes.prompts import (
     CRITIC_SYSTEM,
     evidence_digest,
     hypothesis_digest,
+    lookalike_coverage,
+    lookalike_coverage_text,
 )
 from src.agent.nodes.synthesizer import Synthesis, ledger_of
 from src.agent.state import LOOKALIKE_CHECKLIST, AgentState, CriticVerdict
-from src.tools import REGISTRY, ToolResult
+from src.tools import ToolResult
 
 __all__ = [
     "CRITIC_SCHEMA",
@@ -134,32 +136,16 @@ def lookalikes_measured(tools_called: list[str]) -> list[str]:
     abstention.
 
     The measurement is the fact. The claim is now ignored entirely.
+
+    Expressed against `lookalike_coverage()` rather than re-walking the registry
+    here, because that same mapping is what the planner is shown in the brief.
+    The enforcement and the instruction now read one dict: a tool whose
+    `discriminates` changes moves both at once, and neither can quietly become
+    stricter than the other.
     """
-    measured: set[str] = set()
-    for name in tools_called:
-        spec = REGISTRY.get(name)
-        if spec is not None:
-            measured |= set(spec.discriminates)
-    return [item for item in LOOKALIKE_CHECKLIST if item in measured]
-
-
-def lookalikes_actually_checked(
-    tools_called: list[str], claimed: list[str]
-) -> list[str]:
-    """Look-alikes the run both claimed to weigh and took a measurement about.
-
-    The intersection, not the union. A look-alike counts as checked only if some
-    tool that discriminates it was actually run — otherwise the checklist is a
-    list of things the model said, and a model will happily say all seven.
-    """
-    measured: set[str] = set()
-    for name in tools_called:
-        spec = REGISTRY.get(name)
-        if spec is not None:
-            measured |= set(spec.discriminates)
-    return [
-        item for item in LOOKALIKE_CHECKLIST if item in measured and item in claimed
-    ]
+    called = set(tools_called)
+    coverage = lookalike_coverage()
+    return [item for item in LOOKALIKE_CHECKLIST if called & set(coverage[item])]
 
 
 class Review:
@@ -219,7 +205,7 @@ def review(
             draft,
             "",
             "LOOK-ALIKES THAT MUST BE WEIGHED ON EVERY INVESTIGATION",
-            ", ".join(LOOKALIKE_CHECKLIST),
+            lookalike_coverage_text(),
         ]
     )
 

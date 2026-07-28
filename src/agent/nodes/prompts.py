@@ -12,6 +12,13 @@ X". Step 5 adds a retrieved knowledge layer, but even then the retrieval is
 evidence the agent reads, not a lookup table it matches against — otherwise the
 evaluation measures whether the fault injector and the prompt agree.
 
+`lookalike_coverage_text` sits close to that line and stays on the right side of
+it. It says which *tool* addresses which look-alike, never what a look-alike
+looks like, and it discloses nothing new: the tool catalogue already tells the
+planner "check_ac_ceiling helps separate: clipping, curtailment". This is the
+same relation indexed the other way, so that a requirement stated per look-alike
+can be acted on per look-alike. It is presentation, not knowledge.
+
 What the prompts *do* carry is method: hold several causes at once, prefer the
 measurement that separates them, and say so when nothing does.
 """
@@ -23,7 +30,7 @@ from typing import Any
 import pandas as pd
 
 from src.agent.state import LOOKALIKE_CHECKLIST, AgentState
-from src.tools import ToolContext, ToolResult, catalogue
+from src.tools import REGISTRY, ToolContext, ToolResult, catalogue
 
 __all__ = [
     "CRITIC_SYSTEM",
@@ -31,6 +38,8 @@ __all__ = [
     "ROUTER_SYSTEM",
     "SYNTHESIZER_SYSTEM",
     "evidence_digest",
+    "lookalike_coverage",
+    "lookalike_coverage_text",
     "plant_brief",
     "tool_catalogue_text",
 ]
@@ -82,7 +91,10 @@ Produce:
    from its nearest look-alike. A measurement consistent with four causes is
    nearly worthless.
 4. An ordered opening plan of tool names, cheapest-and-most-discriminating
-   first.
+   first. It must cover every look-alike line in the brief — one tool from
+   each line, and one tool often covers several lines. An answer cannot be
+   accepted with a line left unmeasured, so a plan that leaves one out has
+   committed the investigation to a second round before it starts.
 
 The plan is an opening, not a commitment. Later measurements are expected to
 send the investigation somewhere the plan did not anticipate, and that is a
@@ -214,9 +226,55 @@ CHANNELS AVAILABLE
 whole-plant: {channels}
 per-string current channels: {string_count}
 
-LOOK-ALIKES THAT MUST BE CONSIDERED ON EVERY INVESTIGATION
-{", ".join(LOOKALIKE_CHECKLIST)}
+LOOK-ALIKES THAT MUST BE WEIGHED ON EVERY INVESTIGATION
+Every one of these needs a measurement behind it before an answer can be
+accepted — reasoning about a look-alike does not count as having weighed it,
+however sound the reasoning. Running any one tool on a line below settles that
+line. Several lines are settled by one tool, so five well-chosen measurements
+cover all seven; two of them have only one tool each, so they will not be
+covered by accident.
+
+{lookalike_coverage_text()}
 """
+
+
+def lookalike_coverage() -> dict[str, list[str]]:
+    """For each look-alike, the tools that count as having weighed it.
+
+    Inverted from the registry's `discriminates`, so it cannot drift from the
+    tools themselves. This is the **one** definition: `lookalikes_measured` in
+    the critic checks against it, and `lookalike_coverage_text` shows it to the
+    planner. The instruction and the enforcement therefore cannot disagree,
+    which is the failure this function exists to close.
+
+    They did disagree. The brief said the look-alikes "MUST BE CONSIDERED";
+    the critic hard-vetoed `accept` unless a tool from this mapping had run.
+    Those are different requirements in different vocabularies, and an agent can
+    satisfy the first completely while failing the second — consider clipping
+    perfectly well from a time-of-day profile already in hand, and still be sent
+    back for not calling `check_ac_ceiling`. One case took fifteen measurements,
+    missed exactly one item, and could not be accepted however good its answer.
+    """
+    coverage: dict[str, list[str]] = {item: [] for item in LOOKALIKE_CHECKLIST}
+    for name, spec in sorted(REGISTRY.items()):
+        for item in spec.discriminates:
+            if item in coverage:
+                coverage[item].append(name)
+    return coverage
+
+
+def lookalike_coverage_text() -> str:
+    """The checklist as a requirement that can actually be met.
+
+    The bare list of names told the planner *what* to weigh but not what would
+    count as having weighed it — and two of the seven are covered by exactly one
+    tool each, so "run something relevant" is not good enough to satisfy it by
+    luck.
+    """
+    lines = []
+    for item, tools in lookalike_coverage().items():
+        lines.append(f"- {item}: any of {', '.join(tools) if tools else '(no tool)'}")
+    return "\n".join(lines)
 
 
 def tool_catalogue_text() -> str:

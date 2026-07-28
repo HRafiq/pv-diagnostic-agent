@@ -1969,3 +1969,70 @@ somewhere in its trace and two survived to be scored. macro-F1 0.213 is not a
 measurement of diagnostic ability; it is a measurement of the loop's ability to
 keep an answer it already had. That is worth writing down because the number
 looks like the former and would have been quoted as it.
+
+---
+
+## 0066 — The checklist is stated in the terms it is enforced in (2026-07-28)
+
+**The gap.** The brief told every node:
+
+```
+LOOK-ALIKES THAT MUST BE CONSIDERED ON EVERY INVESTIGATION
+weather, seasonal_temperature_derating, clipping, curtailment, ...
+```
+
+The critic hard-vetoed `accept` unless a tool from the registry's
+`discriminates` had actually run for each of the seven. Those are two different
+requirements in two vocabularies, and an agent can satisfy the first completely
+while failing the second: consider clipping perfectly well from a time-of-day
+profile already in hand, and still be sent back for never calling
+`check_ac_ceiling`. G-017 took fifteen measurements, missed exactly one item —
+`telemetry_gap` — and could not be accepted however good its answer was.
+
+Coverage is also lopsided in a way the bare list hid. Five of the seven have
+three or more tools that satisfy them; `curtailment` and `snow_or_dust_event`
+have exactly one each. "Run something relevant" cannot satisfy the checklist by
+luck, and nothing said so.
+
+**The fix.** `lookalike_coverage()` inverts the registry into
+`{look-alike: [tools that settle it]}`, and it is now the **one** definition:
+`lookalikes_measured` checks against it, `lookalike_coverage_text` shows it in
+the brief, and the critic's own prompt restates it from the same call. A tool
+whose `discriminates` changes moves the instruction and the enforcement
+together; neither can quietly become stricter than the other. The planner prompt
+says the opening plan must cover every line, and why: a plan that leaves one out
+has committed the investigation to a second round before it starts.
+
+`lookalikes_actually_checked` — superseded by DECISION 0057 and since then dead
+production code kept alive by its own tests — is deleted. It was a second,
+divergent walk of `spec.discriminates` sitting beside the one just made
+canonical, which is the exact hazard this entry closes.
+
+**Why C rather than running the tools automatically.** The alternative was a
+deterministic pre-flight: `profile_data_quality` and `detect_stuck_channels` are
+pure functions, so covering `telemetry_gap` costs no LLM call at all. It was
+rejected for now because injecting five tools into every run converges the
+trajectories, and `distinct_tool_trajectories` and `unplanned_measurement_rate`
+are how §5.5 measures whether this is an agent or a pipeline that narrates.
+Buying accepts by having the harness take the measurements would improve the
+score by removing the agency it claims to be scoring. If instruction alone does
+not close the gap, the pre-flight returns — with the injected calls marked in
+the trace so agency can exclude them.
+
+**Cost.** The brief is in the user message, not the cached system prompt, so
+this adds roughly 250 input tokens to every LLM call — on the order of a cent
+per case against a median of $1.00. The rejected alternative was cheaper on
+tokens and more expensive on the thing being measured.
+
+**Not a signature catalogue.** CLAUDE.md forbids handing the planner "string
+outage looks like X". This says which *tool* addresses which look-alike, never
+what one looks like, and it discloses nothing new — the tool catalogue already
+prints "check_ac_ceiling helps separate: clipping, curtailment". It is the same
+relation indexed the other way, so a requirement stated per look-alike can be
+acted on per look-alike.
+
+**What it does not fix.** Whether the checklist is actually what is blocking
+`accept` on most cases is still unmeasured. It was hand-verified on G-017 only.
+DECISION 0060 now prints the blocking reason live — `send_back: look-alikes not
+weighed: telemetry_gap` — so the next run answers that question directly instead
+of by inference.

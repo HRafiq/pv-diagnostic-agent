@@ -22,9 +22,10 @@ from src.agent.llm import ScriptedClient
 from src.agent.loop_plain import investigate
 from src.agent.nodes.critic import (
     CRITIC_SCHEMA,
-    lookalikes_actually_checked,
+    lookalikes_measured,
     review,
 )
+from src.agent.nodes.prompts import lookalike_coverage, lookalike_coverage_text
 from src.agent.nodes.synthesizer import Synthesis
 from src.agent.state import LOOKALIKE_CHECKLIST, AgentState, Hypothesis
 from src.clock import FrozenClock
@@ -126,27 +127,52 @@ def test_the_lookalike_field_is_closed_to_the_checklist() -> None:
 # Look-alike coverage is measured, not asserted
 # ===========================================================================
 def test_a_lookalike_counts_only_if_a_tool_that_discriminates_it_ran() -> None:
-    claimed = list(LOOKALIKE_CHECKLIST)
-    checked = lookalikes_actually_checked(["check_ac_ceiling"], claimed)
-    assert set(checked) == {"clipping", "curtailment"}
+    assert set(lookalikes_measured(["check_ac_ceiling"])) == {"clipping", "curtailment"}
 
 
 def test_claiming_a_lookalike_without_measuring_it_does_not_count() -> None:
     """Box-ticking is what the checklist exists to stop."""
-    assert lookalikes_actually_checked([], list(LOOKALIKE_CHECKLIST)) == []
-
-
-def test_measuring_without_claiming_does_not_count_either() -> None:
-    """Running a tool is not the same as weighing what it bears on."""
-    assert lookalikes_actually_checked(ALL_TOOLS, []) == []
+    assert lookalikes_measured([]) == []
 
 
 def test_every_lookalike_is_reachable_by_some_tool() -> None:
     """A checklist item no tool can address makes `accept` unreachable."""
-    every = lookalikes_actually_checked(
-        [*ALL_TOOLS, "detect_stuck_channels"], list(LOOKALIKE_CHECKLIST)
-    )
+    every = lookalikes_measured([*ALL_TOOLS, "detect_stuck_channels"])
     assert set(every) == set(LOOKALIKE_CHECKLIST)
+
+
+def test_the_planner_is_told_the_rule_the_critic_enforces() -> None:
+    """The instruction and the enforcement must be one definition.
+
+    The brief said the look-alikes "MUST BE CONSIDERED"; the critic hard-vetoed
+    `accept` unless a tool from the registry's `discriminates` had run. Those are
+    different requirements, and an agent can satisfy the first completely while
+    failing the second — one case took fifteen measurements, missed exactly one
+    item, and could not be accepted however good its answer.
+    """
+    coverage = lookalike_coverage()
+    assert set(coverage) == set(LOOKALIKE_CHECKLIST)
+
+    # The enforcement is the mapping, item for item.
+    for item, tools in coverage.items():
+        assert tools, f"{item} is unreachable, so accept would be impossible"
+        for tool in tools:
+            assert item in lookalikes_measured([tool])
+        # And nothing outside the mapping satisfies that line.
+        outsiders = [t for t in ALL_TOOLS if t not in tools]
+        assert item not in lookalikes_measured(outsiders)
+
+
+def test_the_brief_names_a_tool_for_every_lookalike() -> None:
+    """A requirement the reader cannot act on is not an instruction.
+
+    Two of the seven are covered by exactly one tool each, so "run something
+    relevant" will not satisfy the checklist by luck.
+    """
+    text = lookalike_coverage_text()
+    for item, tools in lookalike_coverage().items():
+        assert item in text
+        assert any(tool in text for tool in tools)
 
 
 # ===========================================================================
