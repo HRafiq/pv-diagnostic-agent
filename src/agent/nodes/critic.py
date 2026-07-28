@@ -230,7 +230,13 @@ def review(
 
     # --- the parts the model does not get to decide ------------------------
     grounding = check_numeric_grounding(
-        "\n".join([synthesis.answer, synthesis.summary]), ledger_of(results)
+        "\n".join([synthesis.answer, synthesis.summary]),
+        ledger_of(results),
+        # What the synthesiser was shown, carried on the draft. Rebuilding it
+        # here would leave out the knowledge text — which the critic is not
+        # given — and the physics the agent was handed would be scored as
+        # invented. That is not hypothetical: it cost a correct answer.
+        quotable=synthesis.citable,
     )
     # Two kinds of objection, deliberately not merged.
     #

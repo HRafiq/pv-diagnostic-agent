@@ -1740,3 +1740,90 @@ twice before raising, so a call reaching the last attempt has been tried a
 dozen times. `retry-after` is honoured when the API sends one, bounded at sixty
 seconds so a server asking for ten minutes fails the case rather than stalling
 the run.
+
+---
+
+## 0059 — Grounding checks quotation, not just the ledger (2026-07-28)
+
+**The failure.** G-005's true cause is `seasonal_temperature_derating`. The
+agent named it correctly on cycle 1, was sent back, spent two more cycles and
+574 seconds, and finished on "not enough evidence" — a right answer turned into
+a wrong abstention. The run printed its own reason:
+
+```
+UNGROUNDED FIGURES: ['2014', '2014', '2014', '-3.53642', '6.90082']
+```
+
+`unsupported_claims` is a hard veto (DECISION 0057 made it one deliberately, to
+keep invented numbers off the interface). So a false positive here does not
+merely annoy — it costs a correct answer, every time.
+
+**What was actually wrong.** The check asked "is this figure in some tool's
+provenance ledger?" That is narrower than the guarantee it stands for. The
+guarantee is *no invented numbers*; the ledger is one of several places a
+legitimate number comes from. Three sources were being shown to the agent and
+then scored as fabrication when it used them. All three were reproduced offline,
+without an API key, by running the tool registry against the test plant:
+
+1. **Bare years.** `_MASKS` strips ISO dates, so `2014-05-01` is structure —
+   but a sentence saying "compared with 2014" yields the integer 2014, which
+   clears the free-integer ceiling of 24 and gets checked. A seasonal comparison
+   is *about* comparing years, so the check punished hardest on exactly the
+   reasoning the case required.
+2. **Tool prose.** `ToolResult.digest()` renders `summary`, `caveats` and
+   `labels`, and those carry figures the ledger does not: "a healthy inverter
+   sits near 0.96-0.98 at load" puts two unquotable numbers in front of the
+   model. The probe found two such traps in the synthetic plant alone.
+3. **The knowledge base.** The `seasonal_temperature_derating` signature states
+   that output falls about 0.4% per °C above 25°C — four figures, on the one
+   signature that matters for this case. Quoting the physics it was handed was
+   scored as making it up.
+
+A fourth, smaller bug fell out of the same probe: `0.96-0.98` was parsed as
+`0.96` and *minus* `0.98`. The check was inventing a negative figure and then
+flagging it — manufacturing its own violation.
+
+**The fix.** A second reference source, `quoted_from`: the prose the agent was
+shown. Numbers are pulled from it *without* the masks, so a window written
+`2014-05-01` grounds a sentence that says "2014", while a year the record does
+not contain is still caught. `_NUMBER` gained a lookbehind so a hyphen between
+two digits is a range rather than a sign.
+
+**Why the material is carried on `Synthesis` rather than rebuilt.** The critic
+is not passed the knowledge text. A reconstruction in `critic.py` would quietly
+omit it and re-flag exactly the figures the synthesiser was entitled to quote —
+the same class of divergence CLAUDE.md's "the dashboard must not reimplement a
+computation" rule exists to prevent. `Synthesis.citable` holds the numbers the
+model was shown when it wrote the draft, and every later check reads that.
+
+**What did not change.** Arithmetic is still flagged: both operands shown, their
+difference is not quotable, and a test asserts it. A value interpolated inside a
+quoted range (`0.97` between `0.96` and `0.98`) is arithmetic too, and stays
+flagged. Invented decimals, invented energies, and years outside the record are
+all still caught — verified against the same probe after the change.
+
+**The lesson worth keeping.** `tests/test_grounding.py` had already written the
+failure mode into its own docstring: "a false positive buries the real finding,
+and a check nobody reads is a check that is not running." Every test in it
+tested the false-negative direction against a hand-written ledger. None ran the
+check against the material the agent is actually shown. The bug was not in the
+reasoning; it was in never pointing the check at real inputs.
+
+---
+
+## 0060 — A send_back says why, while the run is still going (2026-07-28)
+
+The critic's trace step already carried `unsupported_claims`,
+`unchecked_lookalikes` and `revision_request`. The progress display printed
+`send_back` and nothing else, so diagnosing why a run was burning three cycles
+per case meant a `jq` query over the trace *after* paying for it.
+
+A send_back costs an extra cycle — minutes, and roughly a third of a case's
+budget. Across 43 cases that is the difference between a debugging run and a
+wasted afternoon, and the information to stop it was already being written to
+disk. The display now shows the blocking reason in the order the critic applies
+them: unsupported figure, then unweighed look-alike, then the reviewer's prose.
+
+This is a view, not a measurement — `eval/progress.py`, not `src/` — and it
+stays inside the existing guarantee that a display failure cannot take down a
+paid run.

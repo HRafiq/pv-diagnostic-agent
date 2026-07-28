@@ -135,3 +135,57 @@ def test_a_display_failure_never_breaks_the_run() -> None:
         with TraceWriter("INV-X", clock=clock, root=tmp, on_step=explode) as writer:
             written = writer.write(a_step("tool", result="fine"))
         assert written.step_index == 0, "the step was still recorded"
+
+
+def test_a_send_back_says_why(capsys: pytest.CaptureFixture[str]) -> None:
+    """A send_back costs a whole extra cycle. Reading the reason out of the
+    trace afterwards is too late to stop a run spending it forty-three times."""
+    printer = StepPrinter(case_id="G-005")
+    printer(
+        a_step(
+            "critic",
+            node="critic",
+            args={
+                "verdict": "send_back",
+                "unsupported_claims": [
+                    "the figure 2014 does not appear in any tool result",
+                    "the figure 6.9 does not appear in any tool result",
+                ],
+            },
+        )
+    )
+    out = capsys.readouterr().out
+    assert "send_back" in out
+    assert "the figure 2014" in out
+    assert "+1 more" in out
+
+
+def test_a_send_back_falls_back_to_the_look_alikes_then_the_request(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    printer = StepPrinter()
+    printer(
+        a_step(
+            "critic",
+            node="critic",
+            args={"verdict": "send_back", "unchecked_lookalikes": ["clipping"]},
+        )
+    )
+    printer(
+        a_step(
+            "critic",
+            node="critic",
+            args={"verdict": "send_back", "revision_request": "measure string 7"},
+        )
+    )
+    out = capsys.readouterr().out
+    assert "look-alikes not weighed: clipping" in out
+    assert "measure string 7" in out
+
+
+def test_an_accept_is_not_padded_with_a_reason(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    printer = StepPrinter()
+    printer(a_step("critic", node="critic", args={"verdict": "accept"}))
+    assert capsys.readouterr().out.strip().endswith("accept")

@@ -596,5 +596,6 @@ def recheck_grounding(out: InvestigationResult) -> list[str]:
     report = check_numeric_grounding(
         "\n".join([out.synthesis.answer, out.synthesis.summary]),
         ledger_of(out.results),
+        quotable=out.synthesis.citable,
     )
     return list(report.ungrounded)

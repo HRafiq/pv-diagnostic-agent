@@ -37,6 +37,13 @@ _LABELS: dict[str, str] = {
 }
 
 
+def _as_strings(value: object) -> list[str]:
+    """A trace step's args are `dict[str, Any]`; a view must not assume shape."""
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if str(item).strip()]
+
+
 def _clip(text: str, width: int) -> str:
     text = " ".join(str(text).split())
     return text if len(text) <= width else text[: width - 1] + "…"
@@ -119,12 +126,35 @@ class StepPrinter:
             excluded = (
                 f" — rules out {', '.join(step.excludes)}" if step.excludes else ""
             )
-            return f"{args.get('verdict', '')}{excluded}"
+            verdict = str(args.get("verdict", ""))
+            if verdict == "send_back":
+                # Why, not just that. A send_back costs a whole extra cycle —
+                # several minutes and roughly a third of the case's budget — and
+                # reading the reason out of the trace afterwards is too late to
+                # stop a run that is going to spend it forty-three times over.
+                return f"{verdict}{excluded}: {self._why_sent_back(args)}"
+            return f"{verdict}{excluded}"
 
         if step.kind == "retrieval":
             return step.result or str(args.get("query", ""))
 
         return step.result or str(args)[: self.width]
+
+    @staticmethod
+    def _why_sent_back(args: dict[str, object]) -> str:
+        """The blocking reason, in the order the critic applies them.
+
+        An unsupported figure and an unweighed look-alike are hard vetoes and
+        say exactly what to fix; the revision request is prose and comes last.
+        """
+        claims = _as_strings(args.get("unsupported_claims"))
+        if claims:
+            extra = f" (+{len(claims) - 1} more)" if len(claims) > 1 else ""
+            return claims[0] + extra
+        unchecked = _as_strings(args.get("unchecked_lookalikes"))
+        if unchecked:
+            return "look-alikes not weighed: " + ", ".join(unchecked)
+        return str(args.get("revision_request") or "no reason given")
 
     def finish(self) -> None:
         """Clear the in-place counter so the next line starts clean."""

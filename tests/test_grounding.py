@@ -11,7 +11,11 @@ module is that detector, so its own failure modes matter in both directions:
 
 from __future__ import annotations
 
-from src.agent.grounding import check_numeric_grounding, numeric_literals
+from src.agent.grounding import (
+    check_numeric_grounding,
+    numeric_literals,
+    quotable_values,
+)
 
 
 def test_a_measured_figure_is_grounded() -> None:
@@ -24,6 +28,78 @@ def test_an_invented_figure_is_caught() -> None:
     assert not report.ok
     assert report.ungrounded == ["0.421"]
     assert "does not appear in any tool result" in report.as_claims()[0]
+
+
+def test_a_figure_the_agent_was_shown_may_be_repeated() -> None:
+    """The guarantee is "no invented numbers", not "no numbers outside the ledger".
+
+    The knowledge base tells the agent that output falls about 0.4% per °C above
+    25°C. Repeating the physics it was handed is quotation, not fabrication —
+    and scoring it as fabrication vetoed a correct answer on a real case.
+    """
+    knowledge = "Output falls about 0.4% per °C of cell temperature above 25°C."
+    assert check_numeric_grounding("about 0.4% per °C", {}, quoted_from=knowledge).ok
+    # But only what was actually shown.
+    assert not check_numeric_grounding(
+        "about 0.9% per °C", {}, quoted_from=knowledge
+    ).ok
+
+
+def test_a_year_in_the_record_grounds_a_year_in_the_prose() -> None:
+    """The masks strip ISO dates, so a *bare* year was checked and flagged.
+
+    The window is given to the agent as `2014-05-01`; the natural sentence about
+    a seasonal comparison says "2014". Three of those, on one case, were enough
+    to force two extra review cycles and a wrong abstention.
+    """
+    brief = "Window 2014-05-01 to 2014-05-15. Record spans 2013-01-01 to 2017-12-31."
+    report = check_numeric_grounding(
+        "Compared with the same weeks in 2014, output is unchanged.",
+        {},
+        quoted_from=brief,
+    )
+    assert report.ok, report.ungrounded
+    # A year the record does not contain is still a fabrication.
+    assert not check_numeric_grounding("in 1998", {}, quoted_from=brief).ok
+
+
+def test_tool_prose_is_quotable_but_the_draft_is_not() -> None:
+    """A caveat's figures are shown to the model; the draft's are not evidence."""
+    caveat = "a healthy inverter sits near 0.96-0.98 at load"
+    assert check_numeric_grounding(
+        "the healthy band starts at 0.96", {}, quoted_from=caveat
+    ).ok
+    # The endpoints were shown; a value interpolated between them was not. That
+    # is arithmetic, and it stays flagged.
+    assert not check_numeric_grounding("the ratio of 0.97", {}, quoted_from=caveat).ok
+    # Self-grounding is the failure mode that makes this whole check pointless.
+    draft = "the ratio was 0.412"
+    assert not check_numeric_grounding(draft, {}).ok
+
+
+def test_a_hyphenated_range_is_two_positive_numbers() -> None:
+    """`0.96-0.98` is a range. Read as a sign it invents a figure that nothing
+    can ground — the check manufacturing its own violation."""
+    assert [item[0] for item in numeric_literals("near 0.96-0.98 at load")] == [
+        "0.96",
+        "0.98",
+    ]
+    # A genuine negative is still read as one.
+    assert numeric_literals("a drift of -3.5 %/yr")[0][1] == -3.5
+
+
+def test_quotable_values_keeps_the_digits_the_masks_remove() -> None:
+    """The two extractions face opposite directions, on purpose."""
+    assert quotable_values("window 2014-05-01") == [2014.0, 5.0, 1.0]
+    assert numeric_literals("window 2014-05-01") == []
+
+
+def test_arithmetic_is_still_not_quotable() -> None:
+    """Both operands shown, their difference is not. CLAUDE.md: no LLM in
+    arithmetic — widening the sources must not widen this."""
+    shown = "compute_expected_output: expected=16090 measured=17812"
+    report = check_numeric_grounding("a gap of 1722 kWh", {}, quoted_from=shown)
+    assert report.ungrounded == ["1722"]
 
 
 def test_rounding_to_fewer_digits_is_accepted() -> None:

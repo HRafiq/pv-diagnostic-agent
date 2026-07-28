@@ -19,7 +19,11 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from src.agent.grounding import GroundingReport, check_numeric_grounding
+from src.agent.grounding import (
+    GroundingReport,
+    check_numeric_grounding,
+    quotable_values,
+)
 from src.agent.llm import LLMClient, LLMResponse
 from src.agent.nodes.prompts import (
     SYNTHESIZER_SYSTEM,
@@ -176,6 +180,12 @@ class Synthesis:
     energy_at_stake_kwh: float
     evidence: list[dict[str, Any]] = field(default_factory=list)
     grounding: GroundingReport = field(default_factory=GroundingReport)
+    # Every number the model was shown when it wrote this draft. Carried on the
+    # synthesis so the critic re-checks against the same material rather than
+    # rebuilding it — the critic is not handed the knowledge text, and a
+    # reconstruction that quietly omitted it would flag figures the synthesiser
+    # had every right to quote.
+    citable: tuple[float, ...] = ()
     response: LLMResponse | None = None
     build_error: str | None = None
 
@@ -307,11 +317,15 @@ def synthesize(
             )
 
     answer = str(payload.get("answer", ""))
+    # `parts` is precisely what the model was shown and contains none of what it
+    # wrote, so it is the honest quotation source.
+    citable = tuple(quotable_values(*parts))
     grounding = check_numeric_grounding(
         "\n".join(
             [answer, str(payload.get("summary", "")), str(payload.get("title", ""))]
         ),
         ledger_of(results),
+        quotable=citable,
     )
 
     return Synthesis(
@@ -328,6 +342,7 @@ def synthesize(
         energy_at_stake_kwh=float(payload.get("energy_at_stake_kwh") or 0.0),
         evidence=list(payload.get("evidence", [])),
         grounding=grounding,
+        citable=citable,
         response=response,
         build_error=build_error,
     )
