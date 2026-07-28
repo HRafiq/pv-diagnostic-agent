@@ -35,6 +35,11 @@ from src.data.sources import SystemMetadata
 from src.knowledge import KnowledgeBase
 from src.physics.modelchain import module_gamma_pdc
 
+# Consecutive per-case failures that end a run. Three rather than one: a
+# single case can legitimately die on its own content, but three in a row
+# after the client's own retries means the environment is the problem.
+_CONSECUTIVE_FAILURE_LIMIT = 3
+
 GOLDEN_DIR = REPO_ROOT / "eval" / "golden"
 DATA_DIR = REPO_ROOT / "data" / "raw"
 TRACE_DIR = REPO_ROOT / "traces"
@@ -112,6 +117,12 @@ def run_agent_engine(
     scores: list[CaseScore] = []
     predictions: list[Prediction] = []
     failures: list[tuple[str, str]] = []
+    # A run that has failed this many cases in a row is not meeting bad luck;
+    # something outside the cases is broken — usually the network. Continuing
+    # burns the rest of the case list at zero work each, which is what four
+    # killed runs looked like. The client already retries transient errors in
+    # place, so reaching this count means the retries did not help either.
+    consecutive_failures = 0
 
     for case in cases:
         bundle = load_plant(case.system_id, DATA_DIR)
@@ -160,6 +171,7 @@ def run_agent_engine(
             raise
         except Exception as exc:  # reported, then scored as a failure
             printer.finish()
+            consecutive_failures += 1
             # A malformed request is a defect here, not a bad case. Isolating it
             # per case just reproduces it once per case — which is exactly what
             # happened: forty-three identical 400s, one round trip each.
@@ -190,8 +202,19 @@ def run_agent_engine(
                 )
             )
             scores.append(score_case(case, predictions[-1]))
+            if consecutive_failures >= _CONSECUTIVE_FAILURE_LIMIT:
+                raise RuntimeError(
+                    f"{consecutive_failures} cases in a row failed, the last "
+                    f"with {type(exc).__name__}: {exc}\n"
+                    f"  Stopping: this is an environment problem rather than a "
+                    f"case problem, and the remaining "
+                    f"{len(cases) - len(predictions)} cases would fail the same "
+                    f"way. {len(predictions) - consecutive_failures} case(s) "
+                    f"completed before it started."
+                ) from exc
             continue
         printer.finish()
+        consecutive_failures = 0
         elapsed_ms = int((time.monotonic() - started) * 1000)
 
         finding = out.finding

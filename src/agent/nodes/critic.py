@@ -232,16 +232,34 @@ def review(
     grounding = check_numeric_grounding(
         "\n".join([synthesis.answer, synthesis.summary]), ledger_of(results)
     )
-    unsupported = list(
-        dict.fromkeys(
-            [
-                *grounding.as_claims(),
-                *(str(c) for c in payload.get("unsupported_claims", [])),
-            ]
-        )
-    )
+    # Two kinds of objection, deliberately not merged.
+    #
+    # `unsupported` is what the *arithmetic* found: a figure in the prose that
+    # appears in no tool's provenance ledger. Objective, verifiable, and a hard
+    # veto — "no fabricated numerics reach the interface" is the guarantee this
+    # whole node exists to keep. A build error is the same kind of thing: the
+    # answer could not be constructed at all.
+    #
+    # `observations` is what the *reviewer* said. Also valuable, and it drives
+    # the revision request — but it is prose judgement, not a measurement, and
+    # it cannot veto on its own.
+    #
+    # These used to be one list, and any entry in it blocked `accept`. A
+    # competent reviewer always finds something to say, so the critic
+    # disqualified every answer it reviewed by doing its job properly: ten
+    # reviews across four cases, zero accepts, and one correct answer pushed
+    # into a wrong abstention. The observations were good — one of them
+    # independently identified a real defect in the fault injector — which is
+    # exactly why they must inform the next cycle rather than end it.
+    unsupported = list(dict.fromkeys(grounding.as_claims()))
     if synthesis.build_error:
         unsupported.append(synthesis.build_error)
+
+    observations = [
+        str(c)
+        for c in payload.get("unsupported_claims", [])
+        if str(c).strip() and str(c) not in unsupported
+    ]
 
     # What the run measured, regardless of what the critic thought to mention.
     # See `lookalikes_measured` for why the critic's own list is not consulted.
@@ -257,6 +275,12 @@ def review(
     if wanted == "accept" and (unsupported or unmeasured):
         verdict = "send_back"
         request = request or _repair_request(unsupported, unmeasured)
+    elif wanted == "accept" and observations:
+        # Accepted with reservations. The reviewer's points are recorded on the
+        # verdict and shown, but a reviewer that finds something to say is not
+        # by itself grounds to reject — that is the difference between a review
+        # and a veto.
+        request = None
     if wanted == "not_enough_evidence" and len(still_standing) < 2:
         # Declining to commit needs two survivors. With fewer, the answer is
         # either settled or the review itself is incoherent; another cycle is
@@ -268,10 +292,16 @@ def review(
             "second survivor and the measurement that would separate them"
         )
     if verdict == "send_back" and not request:
+        # The reviewer's own words are the best available instruction; falling
+        # back to boilerplate throws away the one thing it produced.
         request = (
-            "the review asked for changes without saying what; re-examine the "
-            "strongest surviving cause and name the measurement that would "
-            "exclude it"
+            "address these: " + "; ".join(observations[:3])
+            if observations
+            else (
+                "the review asked for changes without saying what; re-examine "
+                "the strongest surviving cause and name the measurement that "
+                "would exclude it"
+            )
         )
 
     excluded = [
@@ -293,6 +323,7 @@ def review(
             hypotheses_excluded=excluded,
             hypotheses_still_standing=still_standing,
             unsupported_claims=unsupported,
+            observations=observations,
             lookalikes_checked=measured,
             verdict=verdict,
             revision_request=request if verdict == "send_back" else None,
@@ -305,6 +336,7 @@ def review(
             hypotheses_considered=[h.id for h in state.hypotheses],
             hypotheses_still_standing=[h.id for h in state.still_standing],
             unsupported_claims=unsupported,
+            observations=observations,
             lookalikes_checked=measured,
             verdict="send_back",
             revision_request=(

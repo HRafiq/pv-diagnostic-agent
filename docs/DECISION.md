@@ -1588,3 +1588,81 @@ shown. A test asserts every `expected_cause` in the golden set is in it: ground
 truth naming a cause the agent has no way to say is a case that cannot be won.
 `answer`, `summary` and `title` stay free text — the explanation was never the
 problem, the label doing two jobs was.
+
+---
+
+## 0055 — A review is not a veto (2026-07-26)
+
+**What the traces showed.** DECISION 0052 fixed a real bug and missed the
+binding one. Reading the actual critic verdicts from a G-001 trace:
+
+| | `unchecked` | `unsupported` |
+|---|---|---|
+| V1 | `snow_or_dust_event` | 2 prose observations |
+| V2 | — | 2 prose observations |
+| V3 | — | — |
+| V4 | 3 items | 2 prose observations |
+
+Every send_back carried at least one *other* blocking reason, so the 0052 fix
+would not have changed a single verdict on that case. It was still worth doing
+— V1's and V4's `unchecked` entries were pure naming artefacts, since
+`weather_context`, `profile_data_quality` and `check_clearsky_consistency` had
+all run — but it was not the constraint.
+
+**The constraint.** `review()` merged two different things into one list:
+
+```python
+unsupported = [*grounding.as_claims(), *payload.get("unsupported_claims", [])]
+```
+
+and `CriticVerdict` refuses `accept` when that list is non-empty. So the
+critic's own prose observations became hard vetoes. These are not fabricated
+numbers — they are reviews:
+
+> *"there is no matching rise in performance ratio which would be the signature
+> of a bad sensor" — no tool measured or reported a correlation between
+> clear-sky ratio and PR trend; this is an inference presented as evidence.*
+
+That is a good critique, and it disqualified the answer permanently, because a
+competent reviewer always finds something to say. **The critic blocked itself
+by doing its job well.** One of its observations independently identified the
+fault-injector defect recorded in DECISION 0051 — arguing from physics that a
+dead string and a frozen sensor produce the same noiseless zero — which is
+exactly why these must inform the next cycle rather than end the investigation.
+
+**Decision.** The two are separated.
+
+- `unsupported_claims` is what the *arithmetic* found: a figure in the prose
+  that appears in no tool's provenance ledger. Objective, verifiable, and still
+  a hard veto — "no fabricated numerics reach the interface" is the guarantee
+  this node exists for and it does not weaken.
+- `observations` is what the *reviewer* said. Recorded on the verdict, shown,
+  and used as the revision request when one is sent back — the reviewer's own
+  words are a better instruction than boilerplate — but it cannot veto alone.
+
+Replaying the four real verdicts through the new code: all four now accept,
+where all four sent back.
+
+**One thing the trace cannot settle.** It records the verdict, not what the
+model *wanted*. If these send_backs were the model's own choice rather than the
+override's, this changes nothing for them — V3, with nothing flagged at all,
+certainly was. The next run distinguishes the two: with observations no longer
+vetoing, a persistent send_back is the model's judgement, and the fix would
+then be in the critic's prompt rather than in this gate.
+
+## 0056 — Transient failures are retried; a dead network stops the run (2026-07-26)
+
+Four evaluation runs died to `APIConnectionError` and `overloaded_error`,
+losing twenty-plus cases each at zero work apiece. Two changes, at two levels.
+
+**In the client:** `overloaded_error`, dropped connections and rate limits are
+retried in place — three attempts, 2s/4s backoff. The API saying "not now" is
+not "not ever", and abandoning a case on the first one throws away the minutes
+and dollars already spent on it. A `BadRequestError` is deliberately *not*
+retried: it fails identically every time, and `is_systemic_request_error` stops
+the whole run on it instead (DECISION 0048).
+
+**In the runner:** three consecutive case failures end the run with a count of
+what completed and what remains. One case can legitimately die on its own
+content; three in a row *after* the client's retries is the environment, and
+continuing burns the case list for nothing.

@@ -313,3 +313,96 @@ def test_a_budget_breach_still_stops_the_run(monkeypatch: pytest.MonkeyPatch) ->
 
     with pytest.raises(BudgetExceeded):
         runner.run_agent_engine([case])
+
+
+def test_a_dead_network_stops_the_run_rather_than_burning_the_case_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Four real runs lost twenty-plus cases at zero work each to a dropped
+    connection. Three failures in a row — after the client's own retries — is
+    an environment problem, not three unlucky cases."""
+    import eval.runner as runner
+
+    cases = [
+        SimpleNamespace(
+            id=f"G-{n:03d}",
+            system_id=4902,
+            question="?",
+            start="2017-05-16",
+            end="2017-05-30",
+            split="tuning",
+        )
+        for n in range(1, 11)
+    ]
+    monkeypatch.setattr(
+        runner,
+        "load_plant",
+        lambda *a, **k: SimpleNamespace(
+            context=lambda *a, **k: object(), meta=SimpleNamespace(name="p")
+        ),
+    )
+    monkeypatch.setattr(
+        runner, "materialise", lambda *a, **k: SimpleNamespace(full_record=object())
+    )
+    monkeypatch.setattr(runner, "build_client", lambda *a, **k: object())
+    monkeypatch.setattr(
+        runner, "score_case", lambda case, pred: a_score(case.id, False)
+    )
+    monkeypatch.setattr(
+        runner,
+        "investigate",
+        lambda *a, **k: (_ for _ in ()).throw(ConnectionError("Connection error.")),
+    )
+
+    with pytest.raises(RuntimeError, match="cases in a row failed"):
+        runner.run_agent_engine(cases)
+
+
+def test_isolated_failures_do_not_trip_the_breaker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A case that dies on its own content is still just one case."""
+    import eval.runner as runner
+
+    cases = [
+        SimpleNamespace(
+            id=f"G-{n:03d}",
+            system_id=4902,
+            question="?",
+            start="2017-05-16",
+            end="2017-05-30",
+            split="tuning",
+        )
+        for n in range(1, 8)
+    ]
+    monkeypatch.setattr(
+        runner,
+        "load_plant",
+        lambda *a, **k: SimpleNamespace(
+            context=lambda *a, **k: object(), meta=SimpleNamespace(name="p")
+        ),
+    )
+    monkeypatch.setattr(
+        runner, "materialise", lambda *a, **k: SimpleNamespace(full_record=object())
+    )
+    monkeypatch.setattr(runner, "build_client", lambda *a, **k: object())
+    monkeypatch.setattr(
+        runner, "score_case", lambda case, pred: a_score(case.id, False)
+    )
+
+    def every_other(question: str, ctx: Any, *a: Any, **kw: Any) -> Any:
+        if kw["investigation_id"].endswith(("2", "4", "6")):
+            raise ValueError("this one case is malformed")
+        return SimpleNamespace(
+            finding=None,
+            tools_called=["compute_temp_corrected_pr"],
+            unplanned_tools=[],
+            state=SimpleNamespace(cycle=1),
+            cost_usd=0.01,
+            ungrounded_numbers=[],
+        )
+
+    monkeypatch.setattr(runner, "investigate", every_other)
+
+    scores, predictions = runner.run_agent_engine(cases)
+    assert len(predictions) == 7, "the run should have finished every case"

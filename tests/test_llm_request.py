@@ -665,3 +665,93 @@ def test_the_explanation_still_has_somewhere_to_live() -> None:
 
     for field in ("answer", "summary", "title"):
         assert "enum" not in SYNTHESIS_SCHEMA["properties"][field]
+
+
+# ---------------------------------------------------------------------------
+# Transient failures
+# ---------------------------------------------------------------------------
+# Four evaluation runs died to `APIConnectionError` and `overloaded_error`. The
+# API saying "not now" is not the same as "not ever", and abandoning a case on
+# the first one throws away the minutes and money already spent on it.
+def _transient(kind: str) -> Exception:
+    import anthropic
+    import httpx
+
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    if kind == "connection":
+        return anthropic.APIConnectionError(request=request)
+    return anthropic.InternalServerError(
+        "Overloaded", response=httpx.Response(529, request=request), body=None
+    )
+
+
+@pytest.mark.parametrize("kind", ["connection", "overloaded"])
+def test_a_transient_failure_is_retried(
+    kind: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.agent.llm import AnthropicClient
+
+    monkeypatch.setattr("src.agent.llm.time.sleep", lambda _: None)
+    attempts: list[int] = []
+
+    def flaky(**kwargs: Any) -> Any:
+        attempts.append(1)
+        if len(attempts) < 3:
+            raise _transient(kind)
+        return _Stream(_Reply('{"a": 1}', "end_turn"))
+
+    client = AnthropicClient(models=load_models_config(), api_key="not-a-real-key")
+    client._client = SimpleNamespace(messages=SimpleNamespace(stream=flaky))
+
+    response = client.complete("synthesizer", "sys", "user", None)
+    assert len(attempts) == 3, "it gave up before the retries were spent"
+    assert response.text
+
+
+def test_retries_are_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A genuinely dead network must fail the case in seconds, not spin."""
+    import anthropic
+
+    from src.agent.llm import _TRANSIENT_RETRIES, AnthropicClient
+
+    monkeypatch.setattr("src.agent.llm.time.sleep", lambda _: None)
+    attempts: list[int] = []
+
+    def always_down(**kwargs: Any) -> Any:
+        attempts.append(1)
+        raise _transient("connection")
+
+    client = AnthropicClient(models=load_models_config(), api_key="not-a-real-key")
+    client._client = SimpleNamespace(messages=SimpleNamespace(stream=always_down))
+
+    with pytest.raises(anthropic.APIConnectionError):
+        client.complete("synthesizer", "sys", "user", None)
+    assert len(attempts) == _TRANSIENT_RETRIES
+
+
+def test_a_malformed_request_is_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    """It would fail identically every time; the run stops on it instead."""
+    import anthropic
+    import httpx
+
+    from src.agent.llm import AnthropicClient
+
+    monkeypatch.setattr("src.agent.llm.time.sleep", lambda _: None)
+    attempts: list[int] = []
+
+    def bad_request(**kwargs: Any) -> Any:
+        attempts.append(1)
+        raise anthropic.BadRequestError(
+            "schema rejected",
+            response=httpx.Response(
+                400, request=httpx.Request("POST", "https://x/v1/messages")
+            ),
+            body=None,
+        )
+
+    client = AnthropicClient(models=load_models_config(), api_key="not-a-real-key")
+    client._client = SimpleNamespace(messages=SimpleNamespace(stream=bad_request))
+
+    with pytest.raises(anthropic.BadRequestError):
+        client.complete("synthesizer", "sys", "user", None)
+    assert len(attempts) == 1

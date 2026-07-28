@@ -479,3 +479,108 @@ def test_the_checklist_credits_nothing_the_model_merely_claimed() -> None:
     assert set(verdict.lookalikes_checked) == set(one_tool), (
         "the verdict credited a look-alike the run never measured"
     )
+
+
+# ===========================================================================
+# A review is not a veto
+# ===========================================================================
+# Read from a real trace. Every send_back on G-001 carried at least one prose
+# observation, and any entry in `unsupported_claims` blocked `accept` — so the
+# critic disqualified every answer it reviewed by reviewing it thoroughly.
+#
+# The observations were good. One of them independently identified a defect in
+# the fault injector. That is precisely why they must inform the next cycle
+# rather than end the investigation.
+_A_REAL_OBSERVATION = (
+    '"there is no matching rise in performance ratio which would be the '
+    'signature of a bad sensor" — no tool measured or reported a correlation '
+    "between clear-sky ratio and PR trend; this is an inference presented as "
+    "evidence."
+)
+
+
+def test_a_reviewers_prose_objection_does_not_veto_an_accept() -> None:
+    client = ScriptedClient(
+        replies={"critic": [a_verdict(unsupported_claims=[_A_REAL_OBSERVATION])]}
+    )
+    verdict = review(
+        client,
+        a_state([*ALL_TOOLS, "detect_stuck_channels"]),
+        "brief",
+        [a_result("compute_temp_corrected_pr", pr=0.8)],
+        [],
+        a_synthesis(),
+    ).verdict
+
+    assert verdict.verdict == "accept"
+    assert _A_REAL_OBSERVATION in verdict.observations, (
+        "the reviewer's point must still be recorded and shown"
+    )
+    assert verdict.unsupported_claims == [], (
+        "prose judgement must not be filed as a grounding failure"
+    )
+
+
+def test_a_fabricated_figure_still_vetoes() -> None:
+    """The guarantee that matters is unchanged: a number in the prose that no
+    tool measured cannot reach the interface."""
+    client = ScriptedClient(replies={"critic": [a_verdict()]})
+    verdict = review(
+        client,
+        a_state([*ALL_TOOLS, "detect_stuck_channels"]),
+        "brief",
+        [a_result("compute_temp_corrected_pr", pr=0.8)],
+        [],
+        a_synthesis(answer="The performance ratio is 0.42 and losses are 137 kWh."),
+    ).verdict
+
+    assert verdict.verdict == "send_back"
+    assert verdict.unsupported_claims, "the arithmetic check must still bite"
+
+
+def test_the_reviewers_words_become_the_revision_request() -> None:
+    """When it does send back, the reviewer's own point is the instruction —
+    falling back to boilerplate throws away the one thing it produced."""
+    client = ScriptedClient(
+        replies={
+            "critic": [
+                a_verdict(
+                    verdict="send_back",
+                    revision_request="",
+                    unsupported_claims=[_A_REAL_OBSERVATION],
+                )
+            ]
+        }
+    )
+    verdict = review(
+        client,
+        a_state([*ALL_TOOLS, "detect_stuck_channels"]),
+        "brief",
+        [a_result("compute_temp_corrected_pr", pr=0.8)],
+        [],
+        a_synthesis(),
+    ).verdict
+
+    assert verdict.verdict == "send_back"
+    assert verdict.revision_request
+    assert "signature of a bad sensor" in verdict.revision_request
+
+
+def test_the_two_kinds_of_objection_stay_separate() -> None:
+    """Merging them is what caused this; a test that lets them merge again
+    would let it recur."""
+    client = ScriptedClient(
+        replies={"critic": [a_verdict(unsupported_claims=[_A_REAL_OBSERVATION])]}
+    )
+    verdict = review(
+        client,
+        a_state([*ALL_TOOLS, "detect_stuck_channels"]),
+        "brief",
+        [a_result("compute_temp_corrected_pr", pr=0.8)],
+        [],
+        a_synthesis(answer="Losses came to 137 kWh."),
+    ).verdict
+
+    assert verdict.unsupported_claims, "the fabricated figure belongs here"
+    assert verdict.observations == [_A_REAL_OBSERVATION], "the prose belongs here"
+    assert not set(verdict.observations) & set(verdict.unsupported_claims)

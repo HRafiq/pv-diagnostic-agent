@@ -48,6 +48,14 @@ class BudgetExceeded(RuntimeError):
     """Raised when an investigation would exceed its configured cost or call cap."""
 
 
+# Transient failures are retried in place: an overloaded API or a dropped
+# connection is "not now", not "not ever". Three attempts with 2s/4s backoff —
+# long enough to ride out a blip, short enough that a genuinely dead network
+# fails the case in seconds rather than minutes.
+_TRANSIENT_RETRIES = 3
+_RETRY_BACKOFF_SECONDS = 2.0
+
+
 class TruncatedReply(ValueError):
     """The model ran out of output budget mid-reply.
 
@@ -343,6 +351,38 @@ class AnthropicClient:
                 f"cap after {self.calls} calls"
             )
 
+    def _call_with_retry(self, kwargs: dict[str, Any]) -> Any:
+        """Retry the transient failures; let everything else through.
+
+        `overloaded_error`, a dropped connection and a rate limit are the API
+        saying "not now", not "not ever" — and an evaluation that abandons a
+        case on the first one throws away the minutes and dollars already spent
+        on it. Four runs died this way.
+
+        A malformed request is deliberately *not* retried: it will fail
+        identically every time, and `is_systemic_request_error` stops the whole
+        run on it rather than reproducing it once per case.
+        """
+        import anthropic
+
+        transient = (
+            anthropic.APIConnectionError,
+            anthropic.RateLimitError,
+            anthropic.InternalServerError,
+        )
+        last: Exception | None = None
+        for attempt in range(_TRANSIENT_RETRIES):
+            try:
+                with self._client.messages.stream(**kwargs) as stream:
+                    return stream.get_final_message()
+            except transient as exc:
+                last = exc
+                if attempt == _TRANSIENT_RETRIES - 1:
+                    break
+                time.sleep(_RETRY_BACKOFF_SECONDS * (2**attempt))
+        assert last is not None
+        raise last
+
     def complete(
         self,
         node: str,
@@ -364,8 +404,7 @@ class AnthropicClient:
         # every node, so every case failed. Streaming removes the ceiling on
         # how long a reply may take without lowering how long it may be, and
         # `get_final_message()` returns the same object `create()` would.
-        with self._client.messages.stream(**kwargs) as stream:
-            message = stream.get_final_message()
+        message = self._call_with_retry(kwargs)
         latency_ms = int((time.monotonic() - started) * 1000)
 
         text = "".join(

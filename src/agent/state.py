@@ -83,7 +83,21 @@ class CriticVerdict(BaseModel):
     hypotheses_still_standing: list[str] = Field(default_factory=list)
     unsupported_claims: list[str] = Field(
         default_factory=list,
-        description="Claims with no measurement or chunk behind them.",
+        description=(
+            "Figures in the answer that appear in no tool's provenance ledger, "
+            "found by arithmetic rather than judgement. A hard veto on accept: "
+            "this is the 'no fabricated numerics' guarantee."
+        ),
+    )
+    observations: list[str] = Field(
+        default_factory=list,
+        description=(
+            "What the reviewer said, in its own words. Recorded and shown, and "
+            "it drives the revision request — but it does not veto. These were "
+            "once merged into `unsupported_claims`, and because a competent "
+            "reviewer always finds something to say, the critic disqualified "
+            "every answer it reviewed by doing its job properly."
+        ),
     )
     lookalikes_checked: list[str] = Field(default_factory=list)
     verdict: Literal["accept", "send_back", "not_enough_evidence"]
