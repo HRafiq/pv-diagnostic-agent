@@ -2036,3 +2036,103 @@ acted on per look-alike.
 DECISION 0060 now prints the blocking reason live — `send_back: look-alikes not
 weighed: telemetry_gap` — so the next run answers that question directly instead
 of by inference.
+
+---
+
+## 0067 — Look-alike coverage was crowding out the answer (2026-07-28)
+
+**The observation.** G-017 re-run with DECISION 0066 in place. Every mechanical
+check passed: no dead knowledge look-ups, `profile_data_quality` planned rather
+than adaptive, ungrounded figures 6 → 1, **zero send_backs for the first time in
+the project's history**, cost $1.09 → $0.65, latency 644s → 402s. And the case
+came out *worse*: `not enough evidence` against a ground truth of
+`fault / shading`, which an earlier run had answered correctly.
+
+**The cause, which is arithmetic and not luck.**
+
+| | measurements | checklist coverage | answer |
+| --- | --- | --- | --- |
+| before 0066, cycle 1 | 7 | 4/7 | `settled: shading` ✅ |
+| after 0066 | 8 | **7/7** | not enough evidence ❌ |
+
+`max_tools_per_cycle` was 8. Full coverage costs five well-chosen measurements —
+exactly as 0066's own brief promises — leaving three for the question the plant
+manager actually asked. So the run spent them on `check_ac_ceiling`,
+`compute_temp_corrected_pr` and `profile_data_quality`, and **dropped**
+`check_night_offset` and `characterize_onset`, the two onset measurements that
+had produced `shading` before.
+
+0066 worked precisely as designed. Inside a fixed measurement budget it turned
+coverage and discrimination into a zero-sum trade, and coverage won because it
+is the one with a hard veto behind it. A cap chosen before the checklist was
+enforceable stopped being a safety net and became the binding constraint on
+whether the agent could answer at all.
+
+**Fix, part one: the budget lives in one place and is larger.** 8 → 12, moved
+into `limits.max_tools_per_cycle`. It had been hardcoded in `loop_plain`,
+`loop_graph` *and* `eval/runner` — three copies of one number, and a test now
+asserts all three read the config instead.
+
+**Fix, part two: the circuit breakers had to move with it.** These are not
+budgets, and conflating the two was its own bug. `BudgetExceeded` aborts the
+entire evaluation by design, because it normally means the loop is not
+terminating. So a per-investigation cap set *below* the intended operating point
+does not save money — it converts an ordinary expensive case into a dead run.
+The old $1.00 was set when the design target was $0.15 per question; one measured
+cycle is $0.65, and the two 2-cycle runs that legitimately cost $1.09 and $1.11
+were already over it. Twelve measurements is ~18 calls and ~$0.70 a cycle, so
+the §3.5 four-cycle allowance permits ~72 calls and ~$2.80 *by construction*.
+Breakers now sit above that at 80 calls and $3.50, and a test checks the relation
+arithmetically so raising either allowance forces them to be revisited.
+
+This is a spend ceiling, not a spend plan. Median cost is not managed by the
+breaker; it is managed by making extra cycles unnecessary.
+
+---
+
+## 0068 — An abstention may not name a measurement the agent could have taken
+(2026-07-28)
+
+G-017 declined to answer and gave its reason as:
+
+> Run `string_onset_scan` to see whether the morning shortfall's start/end times
+> track the sun
+
+`string_onset_scan` is in its own registry. It had run it on this case in an
+earlier attempt. The abstention was not a judgement that the telemetry cannot
+decide — it was the per-cycle measurement cap, reported as if it were.
+
+CLAUDE.md makes `not_enough_evidence` a first-class successful outcome, and it
+has to stay one: G-039's resolving measurement is the grid operator's dispatch
+log, genuinely outside the plant's data, and declining there is the correct
+answer. The two cases produce identical-looking output and are opposite in
+kind. Nothing in the system told them apart.
+
+`unrun_tools_named_in` does, deterministically: match the registry's tool names
+against the resolving measurement and subtract what was already run. Verified
+against the real text from both runs —
+
+```
+G-017: "Run string_onset_scan to see whether..."   -> ['string_onset_scan']
+G-039: "Pull the grid operator's dispatch log..."  -> []
+```
+
+A substring match suffices because tool names are long and snake_cased;
+`string_onset_scan` does not appear in a sentence by accident.
+
+An abstention naming an unrun tool is now a `send_back` whose request names the
+tool. It is applied to `accept` as well as to `not_enough_evidence`: a reviewer
+that waves through an abstention with an available next step has made the same
+mistake as the node that wrote it. The revision request *replaces* the model's
+own rather than deferring to it, because the deterministic reason is what the
+next cycle has to act on.
+
+The synthesiser prompt now states the rule where it is enforced — the same
+pattern as 0066. "Reserve it for evidence that is genuinely out of reach: a grid
+operator's dispatch log, an inverter's configuration, someone walking the array.
+This is checked against the tool registry, not taken on trust."
+
+**Caveat carried forward.** n=1, and LLM runs are not deterministic; this run and
+the previous G-017 differ by more than the fixes between them. The budget
+arithmetic in 0067 is structural and holds regardless. Whether these two changes
+recover the answer is unmeasured until the next run.

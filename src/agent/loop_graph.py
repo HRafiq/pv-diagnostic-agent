@@ -501,7 +501,7 @@ def investigate_with_graph(
     start: str | None = None,
     end: str | None = None,
     max_cycles: int = 4,
-    max_tools_per_cycle: int = 8,
+    max_tools_per_cycle: int | None = None,
     trace_root: Path | str | None = None,
     critic: Critic | None | Literal[False] = None,
     knowledge: Retriever | KnowledgeBase | None = None,
@@ -513,6 +513,11 @@ def investigate_with_graph(
     test calls both with the same arguments, and a difference in the signature
     would mean the two are not the same thing being compared.
     """
+    if max_tools_per_cycle is None:
+        from src.config import load_models_config
+
+        max_tools_per_cycle = load_models_config().limits.max_tools_per_cycle
+
     window = slice_window(ctx.frame, start, end)
     brief = plant_brief(ctx, question, window)
     state = AgentState(

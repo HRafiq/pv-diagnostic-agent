@@ -111,7 +111,7 @@ def investigate(
     start: str | None = None,
     end: str | None = None,
     max_cycles: int = 4,
-    max_tools_per_cycle: int = 8,
+    max_tools_per_cycle: int | None = None,
     trace_root: Path | str | None = None,
     critic: Critic | None | Literal[False] = None,
     knowledge: Retriever | KnowledgeBase | None = None,
@@ -124,6 +124,15 @@ def investigate(
             supposed to stop itself when nothing further would separate the
             surviving causes; this catches the case where it does not, so a run
             fails loudly at a known bound rather than draining the budget.
+            `None` reads `limits.max_tools_per_cycle`, which is the only place
+            the number lives — it was hardcoded here *and* in `eval/runner.py`,
+            two copies of one budget that could disagree silently.
+
+            It is not a free bound. Full look-alike coverage costs five
+            well-chosen measurements, so at 8 the agent had three left for the
+            question it was actually asked. G-017 spent all eight on coverage,
+            reached 7/7, and then declined to answer — naming `string_onset_scan`
+            as what would resolve it, a tool it owns and had not run.
         critic: `None` uses the LLM critic; a callable substitutes one; `False`
             runs with no review at all, which is the ablation that says whether
             the critic earns its cost. A `send_back` verdict replans with the
@@ -138,6 +147,11 @@ def investigate(
             Injected because `src/` is UI-agnostic; the caller decides whether
             and how to display it. Works with or without `trace_root`.
     """
+    if max_tools_per_cycle is None:
+        from src.config import load_models_config
+
+        max_tools_per_cycle = load_models_config().limits.max_tools_per_cycle
+
     window = slice_window(ctx.frame, start, end)
     brief = plant_brief(ctx, question, window)
     # Tools default to the whole frame, so pin every call to the investigation

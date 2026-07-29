@@ -69,12 +69,33 @@ profiles:
     synthesizer: { model: claude-opus-5, effort: xhigh, thinking: adaptive, max_tokens: 48000, cache_system_prompt: true }
     critic:      { model: claude-opus-5, effort: high,  thinking: adaptive, max_tokens: 48000, cache_system_prompt: true }
 
-# Hard ceilings, enforced client-side before the call is made. A run that trips
-# one of these fails loudly rather than quietly costing money.
+# Circuit breakers, enforced client-side before each call — NOT budgets. The
+# distinction matters and was got wrong: `BudgetExceeded` aborts the whole
+# evaluation by design (it means the loop is not terminating), so a breaker set
+# below the intended operating point does not save money. It converts an
+# ordinary expensive case into a dead run.
+#
+# The arithmetic, measured rather than assumed. One cycle at 12 tools is about
+# 18 LLM calls -- 15 router turns (one per measurement, one per knowledge
+# look-up, one to stop) plus planner, synthesiser and critic -- and roughly
+# $0.70, of which the router's share is small because it is Haiku. Four cycles
+# is the §3.5 allowance, so ~72 calls and ~$2.80 is what this configuration
+# permits *by construction*.
+#
+# The old $1.00 sat below that: it was set when the design target was $0.15 per
+# question, and one measured cycle is $0.65. Two legitimate cycles tripped it
+# and killed the run. These now sit above the allowance, so they fire only on a
+# genuine runaway. Median cost is not managed here — it is managed by making
+# extra cycles unnecessary, which is what the review fixes are for.
 limits:
-  max_llm_calls_per_investigation: 40
-  max_cost_usd_per_investigation: 1.00
+  max_llm_calls_per_investigation: 80
+  max_cost_usd_per_investigation: 3.50
   max_planner_critic_cycles: 4      # §3.5 hard cap
+  # Raised from 8. Full look-alike coverage costs five well-chosen
+  # measurements, so at 8 the agent had three left for the question it was
+  # asked — and it spent them on coverage, then abstained naming a tool it
+  # owned and had not run. See docs/DECISION.md#0067.
+  max_tools_per_cycle: 12
   request_timeout_seconds: 300
 
 # LLM responses are cached by (model, prompt_hash) so regression runs compare

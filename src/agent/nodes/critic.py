@@ -42,13 +42,14 @@ from src.agent.nodes.prompts import (
 )
 from src.agent.nodes.synthesizer import Synthesis, ledger_of
 from src.agent.state import LOOKALIKE_CHECKLIST, AgentState, CriticVerdict
-from src.tools import ToolResult
+from src.tools import ToolResult, tool_names
 
 __all__ = [
     "CRITIC_SCHEMA",
     "Review",
     "lookalikes_measured",
     "review",
+    "unrun_tools_named_in",
 ]
 
 
@@ -146,6 +147,27 @@ def lookalikes_measured(tools_called: list[str]) -> list[str]:
     called = set(tools_called)
     coverage = lookalike_coverage()
     return [item for item in LOOKALIKE_CHECKLIST if called & set(coverage[item])]
+
+
+def unrun_tools_named_in(text: str | None, tools_called: list[str]) -> list[str]:
+    """Measurement tools the text says are needed and the run never took.
+
+    The discriminator between an honest abstention and an unfinished one.
+    `not_enough_evidence` is a first-class outcome (CLAUDE.md) *when the evidence
+    genuinely cannot be obtained* — G-039's resolving measurement is the grid
+    operator's dispatch log, which is outside the telemetry and outside the tool
+    set, so declining there is the right answer. G-017's was "run
+    `string_onset_scan`", a tool in its own registry that it had simply not got
+    to before the per-cycle measurement cap. Those two are not the same
+    outcome, and until this function existed nothing told them apart.
+
+    A substring match is enough because tool names are long, snake_cased and
+    unlike ordinary prose: `string_onset_scan` does not occur in a sentence by
+    accident.
+    """
+    called = set(tools_called)
+    said = text or ""
+    return [n for n in tool_names() if n in said and n not in called]
 
 
 class Review:
@@ -273,6 +295,34 @@ def review(
         # by itself grounds to reject — that is the difference between a review
         # and a veto.
         request = None
+    # An abstention that names a measurement the agent could have taken is not
+    # an abstention; it is an unfinished investigation wearing one. G-017 spent
+    # its whole per-cycle measurement budget covering the look-alike checklist,
+    # reached 7/7, then declined to answer — giving "run `string_onset_scan`" as
+    # what would settle it, a tool in its own registry. Nothing stopped that,
+    # and it scored as a missed fault on a case it had answered correctly in an
+    # earlier run.
+    #
+    # Deliberately applied to `accept` as well: a reviewer that waves through
+    # an abstention with an available next step has made the same mistake as one
+    # that wrote it.
+    avoidable = (
+        unrun_tools_named_in(synthesis.resolving_measurement, list(state.tools_called))
+        if not synthesis.settled
+        else []
+    )
+    if verdict != "send_back" and avoidable:
+        verdict = "send_back"
+        # This message replaces rather than defers to the model's own, because
+        # it is the concrete blocking reason and the next cycle has to act on
+        # exactly it.
+        request = (
+            "the answer declines to commit but names "
+            + ", ".join(avoidable)
+            + " as what would resolve it, and that measurement was never taken. "
+            "Run it. An abstention is only honest when the evidence cannot be "
+            "obtained, not when it has not been collected yet."
+        )
     if wanted == "not_enough_evidence" and len(still_standing) < 2:
         # Declining to commit needs two survivors. With fewer, the answer is
         # either settled or the review itself is incoherent; another cycle is

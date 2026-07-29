@@ -166,6 +166,7 @@ class Limits(BaseModel):
     max_llm_calls_per_investigation: int = Field(..., gt=0)
     max_cost_usd_per_investigation: float = Field(..., gt=0.0)
     max_planner_critic_cycles: int = Field(..., gt=0)
+    max_tools_per_cycle: int = Field(..., gt=0)
     request_timeout_seconds: int = Field(..., gt=0)
 
 

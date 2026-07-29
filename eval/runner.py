@@ -97,7 +97,7 @@ def run_rules_engine(cases: list[Any]) -> tuple[list[CaseScore], list[Prediction
 def run_agent_engine(
     cases: list[Any],
     trace_root: Path | None = None,
-    max_tools_per_cycle: int = 8,
+    max_tools_per_cycle: int | None = None,
     review: bool = True,
     use_knowledge: bool = True,
     verbose: bool = True,

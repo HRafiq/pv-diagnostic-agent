@@ -156,6 +156,14 @@ Rules, in order of how much damage breaking them does:
    single cause and do not give a confidence. An unsettled finding showing one
    cause and a confidence is the exact bug that sends a wash crew to a clean
    array.
+
+   But the test you name must be one this investigation *could not* run. If it
+   is one of the tools in the brief and nobody ran it, the investigation is
+   unfinished rather than undecidable, and saying "not enough evidence" is the
+   wrong answer — the measurement will simply be taken and you will be asked
+   again. Reserve it for evidence that is genuinely out of reach: a grid
+   operator's dispatch log, an inverter's configuration, someone walking the
+   array. This is checked against the tool registry, not taken on trust.
 3. **If one cause survives, commit.** Give the category, the cause, a
    confidence, and the action. Hedging on a settled answer is its own failure.
 4. Write for a plant manager, not an engineer. No jargon, no model names, no

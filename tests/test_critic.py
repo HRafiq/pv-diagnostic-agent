@@ -24,6 +24,7 @@ from src.agent.nodes.critic import (
     CRITIC_SCHEMA,
     lookalikes_measured,
     review,
+    unrun_tools_named_in,
 )
 from src.agent.nodes.prompts import lookalike_coverage, lookalike_coverage_text
 from src.agent.nodes.synthesizer import Synthesis
@@ -610,3 +611,105 @@ def test_the_two_kinds_of_objection_stay_separate() -> None:
     assert verdict.unsupported_claims, "the fabricated figure belongs here"
     assert verdict.observations == [_A_REAL_OBSERVATION], "the prose belongs here"
     assert not set(verdict.observations) & set(verdict.unsupported_claims)
+
+
+# ===========================================================================
+# An abstention must not name a measurement the agent could have taken
+# ===========================================================================
+def test_unrun_tools_named_in_separates_the_two_kinds_of_abstention() -> None:
+    """`not_enough_evidence` is honest only when the evidence is out of reach.
+
+    G-039's resolving measurement is the grid operator's dispatch log — outside
+    the telemetry and outside the tool set, so declining is right. G-017's was
+    "run string_onset_scan", a tool in its own registry that it had not got to
+    before the per-cycle cap. Until this function existed nothing told them
+    apart, and the second scored as a missed fault.
+    """
+    ran = ["compute_temp_corrected_pr"]
+    assert unrun_tools_named_in(
+        "Run string_onset_scan to see whether the shortfall tracks the sun", ran
+    ) == ["string_onset_scan"]
+    assert (
+        unrun_tools_named_in(
+            "Pull the grid operator's dispatch log or the inverter's configuration",
+            ran,
+        )
+        == []
+    )
+    # A tool already run is not an outstanding measurement.
+    assert unrun_tools_named_in("re-read compute_temp_corrected_pr", ran) == []
+    assert unrun_tools_named_in(None, ran) == []
+
+
+def test_an_abstention_naming_an_unrun_tool_is_sent_back() -> None:
+    client = ScriptedClient(replies={"critic": [a_verdict(verdict="accept")]})
+    verdict = review(
+        client,
+        a_state([*ALL_TOOLS, "detect_stuck_channels"]),
+        "brief",
+        [a_result("compute_temp_corrected_pr", pr=0.8)],
+        [],
+        a_synthesis(
+            settled=False,
+            cause=None,
+            confidence=None,
+            candidate_causes=[
+                CandidateCause(cause="shading", consequence_if_true="trim a tree"),
+                CandidateCause(cause="string_outage", consequence_if_true="a visit"),
+            ],
+            resolving_measurement="Run string_onset_scan over the morning hours.",
+        ),
+    ).verdict
+
+    assert verdict.verdict == "send_back"
+    assert verdict.revision_request is not None
+    assert "string_onset_scan" in verdict.revision_request
+    assert "never taken" in verdict.revision_request
+
+
+def test_an_abstention_on_evidence_out_of_reach_stands() -> None:
+    """The outcome the checked-for case must not damage. G-039 is this one."""
+    client = ScriptedClient(
+        replies={
+            "critic": [
+                a_verdict(
+                    verdict="not_enough_evidence",
+                    hypotheses_still_standing=["clipping", "curtailment"],
+                )
+            ]
+        }
+    )
+    verdict = review(
+        client,
+        a_state([*ALL_TOOLS, "detect_stuck_channels"]),
+        "brief",
+        [a_result("check_ac_ceiling", plateau_kw=185.0)],
+        [],
+        a_synthesis(
+            settled=False,
+            cause=None,
+            confidence=None,
+            candidate_causes=[
+                CandidateCause(cause="clipping", consequence_if_true="nothing"),
+                CandidateCause(cause="curtailment", consequence_if_true="nothing"),
+            ],
+            resolving_measurement=(
+                "Pull the grid operator's dispatch log for this window."
+            ),
+        ),
+    ).verdict
+    assert verdict.verdict == "not_enough_evidence"
+
+
+def test_a_settled_answer_is_not_checked_for_outstanding_measurements() -> None:
+    """A committed answer's `resolving_measurement` is stripped, not honoured."""
+    client = ScriptedClient(replies={"critic": [a_verdict()]})
+    verdict = review(
+        client,
+        a_state([*ALL_TOOLS, "detect_stuck_channels"]),
+        "brief",
+        [a_result("compute_temp_corrected_pr", pr=0.8)],
+        [],
+        a_synthesis(resolving_measurement="Run string_onset_scan."),
+    ).verdict
+    assert verdict.verdict == "accept"
