@@ -79,9 +79,62 @@ def _is_transient(exc: BaseException) -> bool:
     if isinstance(exc, anthropic.APIConnectionError):
         return True  # includes APITimeoutError
     if isinstance(exc, anthropic.APIStatusError):
+        # What the API said, first. A malformed request must never be retried
+        # however it is transported, and an overload must always be.
+        kind = _api_error_type(exc)
+        if kind in _SYSTEMIC_ERROR_TYPES:
+            return False
+        if kind in _RETRYABLE_ERROR_TYPES:
+            return True
         code = getattr(exc, "status_code", None)
         return code in _RETRYABLE_STATUS or (isinstance(code, int) and code >= 500)
     return False
+
+
+# What the API calls the failure, in its own words. Consulted *before* the HTTP
+# status because a streamed error does not have a meaningful one: an overload
+# that arrives mid-stream is an SSE `error` event inside a response that already
+# returned **200**, so `_make_status_error` falls through every status branch and
+# builds a bare `APIStatusError` with `status_code == 200`.
+#
+# That is how the retry added in DECISION 0058 came to miss an overload it was
+# written to catch. 0058 replaced exception-class matching with status-code
+# matching and was right to; what it could not know is that DECISION 0049 had
+# already moved every call onto `messages.stream()`, and a 200 carrying an error
+# event defeats status-code matching completely. Two correct fixes, one blind
+# spot between them.
+_RETRYABLE_ERROR_TYPES = frozenset(
+    {"overloaded_error", "api_error", "rate_limit_error", "timeout_error"}
+)
+# The other half of the same blind spot: a malformed request inside a stream also
+# arrives as a 200, so `is_systemic_request_error` did not recognise it either and
+# would have reproduced one codebase defect once per case.
+_SYSTEMIC_ERROR_TYPES = frozenset(
+    {
+        "invalid_request_error",
+        "authentication_error",
+        "permission_error",
+        "not_found_error",
+        "request_too_large",
+    }
+)
+
+
+def _api_error_type(exc: BaseException) -> str | None:
+    """The `error.type` the API reported, wherever the transport left it."""
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        err = body.get("error")
+        if isinstance(err, dict) and err.get("type"):
+            return str(err["type"])
+    # The SDK leaves the body a raw string when the SSE payload will not parse,
+    # and stringifies the dict into the message either way. Sorted so a body
+    # mentioning two names resolves the same way every time.
+    text = body if isinstance(body, str) else str(exc)
+    for name in sorted(_RETRYABLE_ERROR_TYPES | _SYSTEMIC_ERROR_TYPES):
+        if name in text:
+            return name
+    return None
 
 
 def _retry_after(exc: BaseException) -> float | None:
@@ -136,6 +189,14 @@ def is_systemic_request_error(exc: BaseException) -> bool:
         return False
 
     if isinstance(exc, anthropic.BadRequestError):
+        return True
+
+    # A streamed malformed request never becomes a `BadRequestError`, because the
+    # SSE error event rides inside a 200. Ask what the API called it.
+    if (
+        isinstance(exc, anthropic.APIStatusError)
+        and _api_error_type(exc) in _SYSTEMIC_ERROR_TYPES
+    ):
         return True
 
     # The SDK raises a plain ValueError, before any request, for a

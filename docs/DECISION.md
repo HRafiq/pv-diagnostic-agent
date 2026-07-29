@@ -2136,3 +2136,78 @@ This is checked against the tool registry, not taken on trust."
 the previous G-017 differ by more than the fixes between them. The budget
 arithmetic in 0067 is structural and holds regardless. Whether these two changes
 recover the answer is unmeasured until the next run.
+
+---
+
+## 0069 — A streamed error arrives inside a 200 (2026-07-28)
+
+**The failure.** G-017, re-run with 0067 and 0068 in place, died after six
+measurements on `overloaded_error` — the exact failure DECISION 0058 was written
+to retry. Five attempts over thirty seconds should have ridden it out. None
+happened.
+
+**The clue was in the type name.** The log said `APIStatusError`, not
+`OverloadedError`. The SDK maps 529 to `OverloadedError`, so a bare base-class
+instance means the status code was not 529.
+
+**The mechanism, read out of the SDK and reproduced offline.**
+`_streaming.py` handles a mid-stream failure like this:
+
+```python
+if sse.event == "error":
+    raise self._client._make_status_error(err_msg, body=body, response=self.response)
+```
+
+`self.response` is the **stream's** HTTP response, and it succeeded — status
+**200**. `_make_status_error` dispatches purely on `response.status_code`, so
+every branch misses (400, 401, 403, 404, 409, 413, 422, 429, 529, `>= 500`) and
+it falls through to a plain `APIStatusError` whose `status_code` is 200. The real
+reason survives only in the body.
+
+`_is_transient` asked the status code. 200 is not retryable and not `>= 500`, so
+the overload was classified as permanent and the case was abandoned.
+
+**Two correct fixes with a blind spot between them.** DECISION 0058 replaced
+exception-class matching with status-code matching, and the reasoning there still
+holds — enumerating SDK classes is the wrong shape for "is this worth trying
+again". DECISION 0049 moved every call onto `messages.stream()` because raising
+the token ceilings made non-streaming requests illegal. Each was right on its own.
+Together they left every API error travelling by a route where the discriminator
+is meaningless. Neither entry could have anticipated it; nothing tested the two
+in combination, because no test ever built the exception the streaming path
+actually raises.
+
+**The same hole, pointing the other way.** `is_systemic_request_error` also keyed
+on the status: it recognises `BadRequestError`, which a streamed
+`invalid_request_error` never becomes. A schema the API rejects — a defect
+identical for every case, and the reason that check exists — would have been
+treated as a per-case failure and reproduced once per case. The bug that entry was
+written to prevent was reachable again through the new transport, and silently.
+
+**The fix.** Classify on the error type the API reports, consulted *before* the
+status code, with the status-code rule kept as the fallback:
+
+```
+200 overloaded_error       APIStatusError    transient=True   systemic=False
+529 overloaded_error       OverloadedError   transient=True   systemic=False
+200 invalid_request_error  APIStatusError    transient=False  systemic=True
+400 invalid_request_error  BadRequestError   transient=False  systemic=True
+200 some_future_error      APIStatusError    transient=False  (falls back to status)
+502 some_future_error      APIStatusError    transient=True   (falls back to status)
+```
+
+Systemic types are checked first, so a malformed request cannot be retried
+however it is transported. An unrecognised type still falls back to 0058's rule,
+so a new transient class the API introduces on a 5xx keeps being retried without
+this list being updated.
+
+**What the run does and does not tell us.** Nothing about the agent: it never
+reached an answer. The metrics fixes from DECISION 0065 did exactly their job —
+`completed_runs 0`, `failed_runs 1`, and `note: every case failed before
+answering; nothing to measure`, with no agency figures invented from a crash. The
+`macro_f1 0.000` and `missed real faults 1.000` lines are scoring, where failures
+stay in the denominator on purpose; on one case they are noise, not a result.
+
+Whether 0067 and 0068 recover G-017 remains unmeasured. Six measurements is one
+past the old cap of eight would have allowed for discrimination, which is
+suggestive of nothing yet.

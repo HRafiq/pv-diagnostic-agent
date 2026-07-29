@@ -755,3 +755,87 @@ def test_a_malformed_request_is_not_retried(monkeypatch: pytest.MonkeyPatch) -> 
     with pytest.raises(anthropic.BadRequestError):
         client.complete("synthesizer", "sys", "user", None)
     assert len(attempts) == 1
+
+
+# ===========================================================================
+# A streamed error arrives inside a 200, so status codes cannot classify it
+# ===========================================================================
+def _streamed_error(error_type: str, status: int = 200) -> Exception:
+    """Build the exception the SDK raises for an SSE `error` event.
+
+    Reproduces the real path: `_streaming.py` sees `sse.event == "error"` and
+    calls `_make_status_error(..., response=self.response)` — and that response
+    is the *stream's*, which succeeded with 200. Every status branch in
+    `_make_status_error` misses, so it returns a bare `APIStatusError` carrying
+    `status_code == 200` and the real reason only in its body.
+    """
+    import anthropic
+    import httpx
+
+    client = anthropic.Anthropic(api_key="not-a-real-key")
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    body = {
+        "type": "error",
+        "error": {"details": None, "type": error_type, "message": "m"},
+    }
+    return client._make_status_error(
+        f"{body}", body=body, response=httpx.Response(status, request=request)
+    )
+
+
+def test_a_streamed_overload_is_retried() -> None:
+    """The failure this test exists for killed a run after six measurements.
+
+    DECISION 0058 replaced exception-class matching with status-code matching,
+    correctly. DECISION 0049 had already moved every call onto
+    `messages.stream()`. A mid-stream overload is an error event inside a 200,
+    so it reaches `_is_transient` as a bare `APIStatusError` with
+    `status_code == 200` — and was not retried. Two correct fixes, one blind
+    spot between them.
+    """
+    from src.agent.llm import _is_transient
+
+    exc = _streamed_error("overloaded_error")
+    assert type(exc).__name__ == "APIStatusError", "not the SDK's overload class"
+    assert exc.status_code == 200, "the stream's own response succeeded"
+    assert _is_transient(exc)
+
+
+def test_a_direct_overload_is_still_retried() -> None:
+    """The non-streamed form must keep working — 529 maps to `OverloadedError`."""
+    from src.agent.llm import _is_transient
+
+    exc = _streamed_error("overloaded_error", status=529)
+    assert type(exc).__name__ == "OverloadedError"
+    assert _is_transient(exc)
+
+
+def test_a_streamed_malformed_request_is_systemic_not_transient() -> None:
+    """The same blind spot, pointing the other way.
+
+    A schema the API rejects is a defect in this codebase. Inside a stream it
+    also arrives as a 200, so it would have been treated as a per-case failure
+    and reproduced once for every case in the split.
+    """
+    from src.agent.llm import _is_transient, is_systemic_request_error
+
+    exc = _streamed_error("invalid_request_error")
+    assert is_systemic_request_error(exc)
+    assert not _is_transient(exc), "retrying a malformed request cannot help"
+
+
+def test_the_api_error_type_decides_before_the_status_code() -> None:
+    """Order matters: a malformed request must not be retried on a 5xx-ish path."""
+    from src.agent.llm import _is_transient
+
+    assert not _is_transient(_streamed_error("invalid_request_error", status=503))
+    assert _is_transient(_streamed_error("api_error"))
+    assert _is_transient(_streamed_error("rate_limit_error"))
+
+
+def test_an_unrecognised_error_type_falls_back_to_the_status_code() -> None:
+    """The status-code rule from DECISION 0058 is kept, not replaced."""
+    from src.agent.llm import _is_transient
+
+    assert _is_transient(_streamed_error("some_future_error", status=502))
+    assert not _is_transient(_streamed_error("some_future_error", status=200))
