@@ -139,11 +139,46 @@ SUBSET: 5 of 43 cases. This is a debugging run, not a score — do not quote the
   - no unresolvable cases, so correct 'not enough evidence' cannot be measured at all
 ```
 
-A full `compare --split both` is 86 investigations at roughly $0.15 each, and
-headline metrics are reported over three runs — so budget ~$40 for a complete
-figure, or start with `--split tuning` for about $7. Hard caps of 40 calls and
-$1.00 per investigation are enforced before each call, so a runaway loop fails
-loudly rather than quietly billing you.
+### What a run actually costs, measured
+
+The design target was $0.15 a question. **It is not met.** Measured over the
+first real runs, a case costs **$0.65–$1.10** and takes **7–12 minutes**, so a
+full `compare --split both` — 86 investigations, three runs for a headline
+figure — is on the order of **$200 and many hours**, not the ~$40 this section
+used to claim. `--split tuning` is ~$30, not ~$7.
+
+Where it goes is measurable rather than guessed:
+
+```bash
+python -m eval.runner profile          # reads traces already on disk
+```
+
+Almost all of it is the three Sonnet nodes — planner, synthesiser, critic — at
+`effort: high`. The measurements themselves are pure functions and take
+milliseconds; none of the wait is the physics. Most of a multi-cycle run is
+spent *after* cycle 1, re-reviewing an answer that four times over was already
+right, which is why the convergence stop (DECISION 0070) is a latency fix and an
+accuracy fix at once.
+
+`config/models.yaml` carries a `fast` profile — lower effort on the planner and
+critic — as something to measure against `default` rather than a change made on
+a hunch:
+
+```bash
+PV_MODEL_PROFILE=fast python -m eval.runner run --engine agent --only G-017
+```
+
+Circuit breakers of 80 calls and $3.50 per investigation are enforced before
+each call. They are ceilings, not budgets: `BudgetExceeded` aborts the whole
+evaluation, so a breaker set below what four cycles legitimately cost turns an
+expensive case into a dead run. Use `--resume FILE` so a run killed by an API
+overload picks up where it stopped instead of re-paying for finished cases.
+
+**This is a batch tool, not a chat box.** Nobody types a question and waits ten
+minutes. The shape that makes sense is `watcher.py`: a sweep that runs
+unattended and leaves a ranked findings queue with the evidence behind each one,
+which an engineer triages in seconds. The alternative is an engineer spending an
+afternoon on the same question.
 
 ---
 
@@ -205,6 +240,16 @@ comes back looking like this, the agent is a pipeline too.
 **Retrieval, on 18 golden queries:** fusing BM25 with a vector index beats either
 alone by about 0.09 of reciprocal rank. The reranker adds 0.009 — one query
 moving one position — so on this evidence it is close to cost without benefit.
+
+Read that with a large caveat, stated here rather than buried: **the corpus is
+23 chunks and they are the project's own knowledge base.** No external documents
+have been ingested. So this measures finding the right entry among 23 items that
+could equally be looked up by key, which is not the problem retrieval exists to
+solve. Worse, `CorpusRetriever` is not wired into any run — `investigate`
+defaults to the hand-written `KnowledgeBase`, a dict lookup on cause names. Every
+`Looked up what is known about…` line in a run log is that lookup, not
+retrieval. The stack is built, tested and unused; making the claim real needs a
+real corpus behind it.
 "Right document in top 10" is **not reported**, because on a 23-chunk corpus it
 scores 1.000 for every configuration including ones that have learned nothing;
 the harness detects that and drops the column rather than printing a number a
@@ -220,7 +265,9 @@ is a false alarm waiting to be dispatched on.
 - **The agent's accuracy.** Needs a key.
 - **Whether retrieval changes it.** `--no-knowledge` runs the identical loop
   without it. The retrieval numbers say the right passage comes back; they say
-  nothing about whether the agent diagnoses better for having read it.
+  nothing about whether the agent diagnoses better for having read it — and on a
+  23-chunk corpus that is its own knowledge base, they say very little at all.
+- **Whether RAG is in the loop.** It is not. See the caveat above.
 - **Whether the critic earns its cost.** `--no-review` runs the identical loop
   without it.
 

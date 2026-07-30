@@ -2328,3 +2328,90 @@ The honest ledger on the framework, for `docs/LANGGRAPH_TRADEOFF.md`: it makes
 within-run resume *possible* where the plain loop makes it impossible. It did
 not deliver the thing the docstring promised, and the thing that was actually
 needed took thirty lines of `json.dumps` in the runner.
+
+---
+
+## 0073 — Measure the run instead of estimating it (2026-07-29)
+
+Every speed decision in this project was made from an estimate: count the calls
+in a run log, multiply by a guessed per-call latency, argue from the product.
+"About 80% of the wait is the eight Sonnet calls" was said out loud on exactly
+that basis. It may well be right. It was never checked, and it did not need a
+new run to check — `TraceStep` has recorded `latency_ms` and `cost_usd` since
+step 3, and there were seven runs on disk.
+
+`eval/runner.py profile` reads them. Per node: calls, seconds, share, dollars;
+per run and in total; plus the number the latency argument turns on — **how much
+was spent after cycle 1**, which is the re-review overhead that four cases paid
+for an answer they already had.
+
+**Two things it refuses to do, because both would flatter the result.**
+
+A trace with no recorded timing is *skipped and named*, not averaged in. Scripted
+and replayed traces record zero latency, and including them would halve every
+figure. The report says "no timing recorded, skipped" and gives the count of
+timed runs against the total.
+
+A `tool` step's latency is the **router turn that chose the measurement**, not
+the measurement. Tools are pure functions and take milliseconds. The report says
+so in as many words, because a reader who concluded the physics was slow would
+draw exactly the wrong lesson about where to optimise.
+
+**Two gaps this found in the trace itself, which is the point of building it.**
+The critic's cost and latency were accrued to the run total and never written
+onto its trace step, so review — the node whose value is least established —
+appeared free to anything reading the tape. That is fixed, and older traces are
+flagged as under-reporting review rather than silently averaged. The repository
+guard from DECISION 0043 also caught `eval/profile.py` as untracked before it
+could become a second `src/findings/build.py`.
+
+---
+
+## 0074 — A `fast` profile, added as a lever rather than pulled (2026-07-29)
+
+The obvious response to a ten-minute run is to lower `effort` on the expensive
+nodes. That is a quality trade, and making it by editing `default` would repeat
+the mistake DECISION 0073 exists to stop.
+
+So it is a third profile beside `default` and `quality`, selectable with
+`PV_MODEL_PROFILE=fast`, to be measured rather than assumed. Planner and critic
+drop to `effort: medium`; the synthesiser stays at `high` because it writes the
+answer a plant manager reads and is the node least worth degrading. The critic
+drops because it is the node whose value is least established — one help, four
+correct answers destroyed — so it is the cheapest place to spend less while that
+is being settled.
+
+The eval output now prints the active profile in its header. Two runs at
+different effort settings were previously indistinguishable in the output, which
+makes a comparison between them not a comparison.
+
+---
+
+## 0075 — The README said things that were not true (2026-07-29)
+
+Three corrections, all of them the same kind of error: a design target reported
+as though it were a measurement.
+
+**Cost.** "86 investigations at roughly $0.15 each… budget ~$40… `--split
+tuning` for about $7." Measured, a case is $0.65–$1.10 and 7–12 minutes, so the
+real figures are ~$200 and ~$30. The target is now stated as a target, followed
+by the measurement and the word "not met".
+
+**Latency and shape.** The README implied a question-and-answer tool. Nobody
+waits ten minutes at a prompt. The honest shape is `watcher.py` — an unattended
+sweep leaving a ranked findings queue with evidence, triaged in seconds — and the
+README now says that rather than letting a reader assume something the system
+does not do well. The alternative being compared against is an engineer spending
+an afternoon, not a chatbot answering instantly.
+
+**RAG.** The retrieval numbers were reported without the two facts that decide
+what they mean: the corpus is 23 chunks and *is the project's own knowledge
+base*, and `CorpusRetriever` is not wired into any run — `investigate` defaults
+to a dict lookup on cause names. Every "Looked up what is known about…" line in
+every run log is that lookup. The stack is built, tested, measurably better than
+BM25 alone, and unused. Saying so costs a talking point and is the only version
+that survives a reader checking.
+
+The pattern across all three is worth naming: each number was written when it was
+a plan, and stayed after it became false. Nothing re-checked them because nothing
+had run end to end.

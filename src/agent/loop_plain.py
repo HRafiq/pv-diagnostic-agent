@@ -579,8 +579,14 @@ def investigate(
                 )
                 _accrue(out, reviewed.response)
                 verdict = reviewed.verdict
+                review_tokens = reviewed.response.tokens if reviewed.response else 0
+                review_cost = reviewed.response.cost_usd if reviewed.response else 0.0
+                review_latency = (
+                    reviewed.response.latency_ms if reviewed.response else 0
+                )
             else:
                 verdict = critic(state, out.results, synthesis)
+                review_tokens, review_cost, review_latency = 0, 0.0, 0
             previous_verdict = verdict
             previous_cause = synthesis.cause
             measurements_at_last_review = len(out.results)
@@ -599,6 +605,12 @@ def investigate(
                     },
                     result=_verdict_in_plain_words(verdict, state),
                     was_planned=True,
+                    # Recorded on the step, not only accrued to the run total.
+                    # Without this the trace cannot say what review cost, and
+                    # review is the node whose value is most in question.
+                    tokens=review_tokens,
+                    cost_usd=review_cost,
+                    latency_ms=review_latency,
                 )
             )
             if verdict.verdict == "not_enough_evidence":

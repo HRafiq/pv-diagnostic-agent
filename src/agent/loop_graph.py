@@ -448,8 +448,12 @@ def build_graph(run: _Run, checkpointer: Any | None = None) -> Any:
             )
             _accrue(run.out, reviewed.response)
             verdict = reviewed.verdict
+            review_tokens = reviewed.response.tokens if reviewed.response else 0
+            review_cost = reviewed.response.cost_usd if reviewed.response else 0.0
+            review_latency = reviewed.response.latency_ms if reviewed.response else 0
         else:
             verdict = run.critic(state, run.out.results, synthesis)
+            review_tokens, review_cost, review_latency = 0, 0.0, 0
         run.previous_verdict = verdict
         run.previous_cause = synthesis.cause
         run.measurements_at_last_review = len(run.out.results)
@@ -468,6 +472,9 @@ def build_graph(run: _Run, checkpointer: Any | None = None) -> Any:
                 },
                 result=_verdict_in_plain_words(verdict, state),
                 was_planned=True,
+                tokens=review_tokens,
+                cost_usd=review_cost,
+                latency_ms=review_latency,
             )
         )
         if verdict.verdict == "send_back":

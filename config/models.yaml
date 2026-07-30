@@ -61,6 +61,33 @@ profiles:
       max_tokens: 32000
       cache_system_prompt: true
 
+  # Latency-tuned, and NOT the default until it has been measured against one.
+  #
+  # A profile rather than an edit to `default` on purpose. Every speed decision
+  # in this project so far was made from an estimate — count the calls in a log,
+  # multiply by a guessed per-call latency, argue from the product — and the
+  # point of `eval/runner.py profile` is to stop doing that. Lowering `effort`
+  # is a quality trade, so it gets measured rather than assumed:
+  #
+  #   PV_MODEL_PROFILE=fast python -m eval.runner run --engine agent \
+  #       --only G-017 --resume runs/fast.jsonl
+  #
+  # then `profile` both runs and compare. If accuracy holds, promote it.
+  #
+  # What changed and why, per node:
+  #  - planner: effort high -> medium. Enumerating candidate causes is bounded
+  #    work; the tool catalogue and the look-alike lines do most of the framing.
+  #  - synthesiser: left at high. It writes the answer a plant manager reads and
+  #    is the node least worth degrading.
+  #  - critic: high -> medium. The node whose value is least established — it
+  #    has helped once and destroyed a correct answer four times — so it is the
+  #    cheapest place to spend less while that is being settled.
+  fast:
+    planner:     { model: claude-sonnet-5, effort: medium, thinking: adaptive, max_tokens: 12000, cache_system_prompt: true }
+    router:      { model: claude-haiku-4-5, effort: null, thinking: null, max_tokens: 1500, cache_system_prompt: true }
+    synthesizer: { model: claude-sonnet-5, effort: high, thinking: adaptive, max_tokens: 32000, cache_system_prompt: true }
+    critic:      { model: claude-sonnet-5, effort: medium, thinking: adaptive, max_tokens: 32000, cache_system_prompt: true }
+
   # Upper bound on quality, for the cost/quality frontier in docs/FINDINGS.md.
   # Expect roughly 3-5x the cost of `default`.
   quality:

@@ -360,7 +360,13 @@ def _run_engine(
 ) -> tuple[list[CaseScore], list[Prediction]]:
     if engine == "rules":
         return run_rules_engine(cases)
-    print(f"\nrunning the agent over {len(cases)} cases\n")
+    # Which model configuration produced these numbers. Without it, two runs
+    # with different effort settings are indistinguishable in the output and a
+    # comparison between them is not a comparison.
+    profile_name = load_models_config_cached().active_profile
+    print(
+        f"\nrunning the agent over {len(cases)} cases [model profile: {profile_name}]\n"
+    )
     return run_agent_engine(
         cases,
         review=not getattr(args, "no_review", False),
@@ -491,6 +497,28 @@ def _cmd_experiments(args: argparse.Namespace) -> int:
         )
     if args.out:
         Path(args.out).write_text(json.dumps([r.as_row() for r in results], indent=2))
+        print(f"\n  wrote {args.out}")
+    return 0
+
+
+def _cmd_profile(args: argparse.Namespace) -> int:
+    """Read runs already paid for, rather than estimating from call counts."""
+    from eval.profile import profile_traces, render, summary
+
+    root = Path(args.traces) if args.traces else TRACE_DIR / "eval"
+    if not root.exists():
+        print(
+            f"\nno traces at {root}. Runs write them there; pass --traces to "
+            "point somewhere else."
+        )
+        return 1
+
+    profiles = profile_traces(root)
+    print(f"\nprofiling {len(profiles)} trace(s) under {root}")
+    print(render(profiles))
+
+    if args.out:
+        Path(args.out).write_text(json.dumps(summary(profiles), indent=2))
         print(f"\n  wrote {args.out}")
     return 0
 
@@ -786,6 +814,20 @@ def main(argv: list[str] | None = None) -> int:
     p_cmp.add_argument("--quiet", action="store_true")
     p_cmp.add_argument("--no-knowledge", action="store_true")
     p_cmp.set_defaults(func=_cmd_compare)
+
+    p_prof = sub.add_parser(
+        "profile",
+        help="Where time and money went, from traces already on disk.",
+    )
+    p_prof.add_argument(
+        "--traces",
+        type=str,
+        default=None,
+        metavar="DIR",
+        help="Directory of trace files (default: traces/eval).",
+    )
+    p_prof.add_argument("--out", type=str, default=None)
+    p_prof.set_defaults(func=_cmd_profile)
 
     p_ret = sub.add_parser(
         "retrieval", help="Score retrieval over the golden queries and ablate."
