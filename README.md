@@ -21,15 +21,17 @@ causes, says so and names the cheap test that would.
 The output is one of three instructions: **send someone, schedule something, or
 do nothing.** The third is the one nobody sells and often the most valuable.
 
-> **Status: 12 of 13 steps complete. The agent has not been scored.**
+> **Status: all 13 steps built. The agent has been run, and it has not been
+> scored.**
 >
-> No `ANTHROPIC_API_KEY` was available in the environment this was built in, so
-> every number published here comes from the physics, the rules baseline, the
-> fault injector or the retrieval index — all of which run without one. The
-> evaluation harness, the golden set, the metrics, both ablations and the
-> rules-vs-agent comparison are complete and tested; **the agent column is empty
-> because it has not been run, not because it is pending analysis.** One command
-> fills it in. See *Results*.
+> Those are different claims. Eight tuning cases have been run end to end — 0.700
+> overall accuracy, **0.000 false alarms on look-alikes**, $0.36 and 196s a case —
+> and they are the eight cases the tools were tuned against, so the number is
+> optimistic by construction and is not a score. The full tuning split and then
+> the held-back split are what turn the v1 targets from "not measured" into a
+> verdict. See *Results* for the figures and the three reasons not to quote them.
+>
+> New here? `docs/WALKTHROUGH.md` explains the whole project end to end.
 
 ---
 
@@ -454,15 +456,22 @@ Three things the ingest does that are easy to get wrong:
 
 ---
 
-## Results
+## Where to read the numbers
 
-**The agent has not been scored yet** — no API key was available in the
-environment this was built in, so `docs/FINDINGS.md` carries the rules baseline,
-the physics validation and the bugs the evaluation found in itself, with the
-agent column explicitly empty rather than pending.
+This file had two sections called *Results*, and after the agent was first run
+only one of them was updated — so the document said the agent had been scored and
+had not been scored, forty lines apart. The figures live in one place now:
 
-The rules baseline, on 43 held-back cases: overall accuracy 0.469, false alarms
-on look-alikes 0.056, and **correct "not enough evidence" 0.000** — which no
-amount of tuning changes, because the engine commits to the first rule that fires
-and cannot hold two causes open. That number is the one to watch when the agent
-column is filled in.
+- **[Results](#results)** above — the rules baseline on both splits, the agent on
+  eight tuning cases, and what each is and is not evidence for.
+- **`docs/FINDINGS.md`** — the full detail, including the physics validation and
+  the bugs the evaluation found in *itself*, each of which would have made a
+  published accuracy figure meaningless.
+- **`docs/WALKTHROUGH.md`** — the whole project end to end, for a first read.
+- **`docs/DECISION.md`** — append-only, every non-obvious choice with the
+  alternatives considered.
+
+The one number to watch across all of them is **correct "not enough evidence"**.
+The rules baseline scores 0.000 on it structurally — it commits to the first rule
+that fires and cannot hold two causes open — so it is the single column where an
+agent has somewhere to be better rather than merely different.
