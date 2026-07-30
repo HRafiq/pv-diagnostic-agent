@@ -116,14 +116,49 @@ python watcher.py findings                         # finds the real 2016 gap
 uvicorn dashboard.app:app --reload                 # http://127.0.0.1:8000
 ```
 
-**These need one.** They are the empty column in *Results*:
+Two of them read runs already on disk, which is where most of the debugging
+happens — `profile` says where the time and money went, `explain` prints one
+case's whole reasoning rather than the 96-character clip the live display shows:
+
+```bash
+python -m eval.runner profile                      # seconds and $ per node
+python -m eval.runner explain G-004                # one case, in full
+python -m eval.runner explain G-004 --attempt 2    # an earlier run of it
+```
+
+**These need a key:**
 
 ```bash
 cp .env.example .env                               # add ANTHROPIC_API_KEY
 python -m eval.runner run --engine agent --split tuning
-python -m eval.runner run --engine agent --split tuning --quiet
 python -m eval.runner compare --split heldback     # rules vs agent
 python -m eval.runner experiments --runs 3         # both ablations, mean ± spread
+```
+
+**Review has three modes**, because the critic node does two separable things:
+deterministic checks that need no model — no fabricated numerics, every
+look-alike weighed, no abstention naming a tool the agent owns and did not run —
+and an LLM judgement. Only the second is slow, and only the second has a record
+of talking correct answers out of themselves.
+
+```bash
+python -m eval.runner run --engine agent --split tuning                  # both
+python -m eval.runner run --engine agent --split tuning --checks-only    # checks
+python -m eval.runner run --engine agent --split tuning --no-review      # neither
+```
+
+`--no-review` is the control the ablation is measured against, so it stays a
+clean single pass. `--checks-only` is the configuration the evidence so far
+points at shipping.
+
+**A long run should survive dying.** `--resume FILE` records each case as it
+finishes and skips those already there, so an API overload at case 20 costs one
+case rather than the run. Use a fresh file when the code has changed under it —
+the journal has no idea it did.
+
+```bash
+python -m eval.runner run --engine agent --split tuning \
+    --checks-only --resume runs/tuning.jsonl --out runs/tuning.json
 ```
 
 **Iterating? Run a subset.** `--sample 8` draws eight cases stratified by
@@ -260,16 +295,51 @@ reader might quote.
 corrected figure stays flat at 0.86–0.92 — every one of those raw summer troughs
 is a false alarm waiting to be dispatched on.
 
+**The agent, on eight tuning cases with `--checks-only`:**
+
+| | before the string-baseline fix | after |
+| --- | --- | --- |
+| Overall accuracy | 0.493 | 0.700 |
+| Cause accuracy | 0.625 | 0.875 |
+| **False alarms on look-alikes** | **0.500** | **0.000** |
+| Correct "not enough evidence" | 1.000 | 1.000 |
+| Missed real faults | 0.000 | 0.000 |
+
+Median $0.36 and 196 seconds a case, no failures, eight distinct tool
+trajectories from eight runs.
+
+**Read this as a debugging run, not a score, for three reasons.** Eight cases is
+a subset and the harness prints so above the results. The tools were *changed in
+response to these eight failing*, so the number is optimistic by construction —
+the other 35 tuning cases are the fairer test and the held-back split is the
+real one. And two cases improved while only one of them is attributable: G-005
+read the corrected string figure and moved off `string_outage`, which is exactly
+the predicted mechanism, while G-029 took a different measurement path and may
+simply have varied.
+
+That zero on false alarms is the number that moved, and it moved because a tool
+was measuring against the wrong reference — this array has a string that has
+carried ~12% less than its neighbours for the whole record, and two tools
+reported that standing characteristic as a deficit. See DECISION 0079 and 0083.
+
 ### What has not
 
-- **The agent's accuracy.** Needs a key.
+- **The agent's accuracy at a scale worth quoting.** Eight cases is a debugging
+  run. The full tuning split, then the held-back split, reported separately with
+  the gap stated, is what turns the v1 targets from `n/a` into a verdict.
 - **Whether retrieval changes it.** `--no-knowledge` runs the identical loop
   without it. The retrieval numbers say the right passage comes back; they say
   nothing about whether the agent diagnoses better for having read it — and on a
   23-chunk corpus that is its own knowledge base, they say very little at all.
 - **Whether RAG is in the loop.** It is not. See the caveat above.
-- **Whether the critic earns its cost.** `--no-review` runs the identical loop
-  without it.
+- **Whether the LLM reviewer earns its cost, at any scale.** One case has been
+  run both ways. G-017 with the reviewer took 644-900 seconds and $1.09-1.31 and
+  ended on "not enough evidence"; with `--no-review` it answered `shading`
+  correctly in 165 seconds for $0.29. That is n=1, on the one case the reviewer
+  had already failed three times, so it is the least surprising case for it to
+  happen on — but it is why `--checks-only` exists, and why the reviewer is off
+  in the eight-case figures above. Across every case seen so far the reviewer
+  has improved one answer and talked four correct ones out of themselves.
 
 `docs/FINDINGS.md` has the full detail, including a section on the bugs the
 evaluation found in *itself* — each of which would have made a published accuracy
@@ -292,7 +362,7 @@ figure meaningless.
 | 8 | Watcher: sweep, findings store with lifecycle, energy ranking. Tab 2 | **done** |
 | 9 | RAG layer + retrieval golden set + ablation | **done** |
 | 10 | Saved analyses registry with golden-case enforcement | **done** |
-| 11 | Full evaluation, agency metrics, both experiments | harness done, **needs a key** |
+| 11 | Full evaluation, agency metrics, both experiments | harness done, **eight cases run; full splits outstanding** |
 | 12 | LangGraph port; verify identical golden-set outputs | **done** |
 | 13 | README with honest results, including whatever the ablations showed | **done** |
 
