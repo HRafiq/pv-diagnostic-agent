@@ -35,7 +35,14 @@ from typing import Any
 from src.trace.models import TraceStep
 from src.trace.writer import read_trace
 
-__all__ = ["NodeCost", "RunProfile", "profile_run", "profile_traces", "render"]
+__all__ = [
+    "NodeCost",
+    "RunProfile",
+    "profile_run",
+    "profile_traces",
+    "render",
+    "split_attempts",
+]
 
 # What a reader recognises, mapped from what the trace calls it. `tool` and
 # `adaptive` both mean "a router turn chose a measurement".
@@ -76,6 +83,8 @@ class RunProfile:
     measurements: int = 0
     # True when the trace predates review costs being written onto the step.
     review_cost_missing: bool = False
+    attempt: int = 1
+    of_attempts: int = 1
 
     @property
     def seconds(self) -> float:
@@ -96,9 +105,41 @@ class RunProfile:
         return sum(c.seconds for c in later), sum(c.usd for c in later)
 
 
-def profile_run(path: Path | str) -> RunProfile:
-    """Read one trace file."""
-    steps = list(read_trace(path))
+def split_attempts(steps: list[TraceStep]) -> list[list[TraceStep]]:
+    """Cut a trace file into the separate runs concatenated inside it.
+
+    `TraceWriter` opens with mode `"a"`, and the evaluation names every trace
+    after the case (`INV-G-004`), so re-running a case **appends** to the file
+    it wrote last time. A trace on disk is therefore every attempt at that case
+    ever made, end to end.
+
+    That is not a cosmetic problem. Read naively, `INV-G-004` reports 59
+    measurements, 4 cycles and $3.37 — while the run that produced its last
+    entries took 11 measurements and cost $0.34. Every per-run figure was the
+    sum of a session's worth of attempts, and "after cycle 1" was mixing runs
+    that never saw each other.
+
+    `step_index` is stamped from a counter that starts at zero per writer, so a
+    new attempt is exactly where the index stops increasing. No timestamps, no
+    heuristics.
+    """
+    attempts: list[list[TraceStep]] = []
+    current: list[TraceStep] = []
+    last = -1
+    for step in steps:
+        if step.step_index <= last and current:
+            attempts.append(current)
+            current = []
+        current.append(step)
+        last = step.step_index
+    if current:
+        attempts.append(current)
+    return attempts
+
+
+def profile_run(path: Path | str, steps: list[TraceStep] | None = None) -> RunProfile:
+    """Read one attempt. Pass `steps` to profile one segment of a trace file."""
+    steps = list(read_trace(path)) if steps is None else steps
     out = RunProfile(investigation_id=Path(path).stem)
     saw_review = False
     review_with_cost = False
@@ -123,11 +164,26 @@ def profile_run(path: Path | str) -> RunProfile:
 
 
 def profile_traces(root: Path | str, pattern: str = "**/*.jsonl") -> list[RunProfile]:
-    """Every trace under `root`, oldest first."""
+    """Every *attempt* under `root`, oldest first.
+
+    One entry per run, not per file — see `split_attempts` for why those differ.
+    """
     base = Path(root)
-    if base.is_file():
-        return [profile_run(base)]
-    return [profile_run(p) for p in sorted(base.glob(pattern))]
+    files = [base] if base.is_file() else sorted(base.glob(pattern))
+
+    out: list[RunProfile] = []
+    for path in files:
+        attempts = split_attempts(list(read_trace(path)))
+        for n, steps in enumerate(attempts, start=1):
+            profile = profile_run(path, steps=steps)
+            if len(attempts) > 1:
+                # Named so a reader can see this case was run more than once and
+                # which attempt they are looking at.
+                profile.investigation_id = f"{profile.investigation_id} #{n}"
+                profile.attempt = n
+                profile.of_attempts = len(attempts)
+            out.append(profile)
+    return out
 
 
 def _table(rows: list[tuple[str, NodeCost]], total_seconds: float) -> list[str]:

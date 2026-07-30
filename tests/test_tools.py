@@ -808,3 +808,75 @@ def test_a_ledger_with_a_nan_cannot_be_constructed() -> None:
 
     with pytest.raises(ValueError, match="non-finite"):
         ToolResult(tool="x", summary="y", values={"pr": float("nan")})
+
+
+# ===========================================================================
+# A string below the even share is not automatically a fault
+# ===========================================================================
+def _plant_with_a_standing_offset(days: int = 90) -> pd.DataFrame:
+    """String 7 has carried ~12.5% for the whole record, and always has.
+
+    This is the NIST system's real shape — a smaller combiner, or a fault that
+    predates the data. Nothing has failed.
+    """
+    frame = synthetic_frame(days=days, start="2017-01-01")
+    columns = [f"string_current_a_{n}" for n in range(1, 8)]
+    total = frame[columns].sum(axis=1)
+    frame["string_current_a_7"] = total * 0.125
+    for n in range(1, 7):
+        frame[f"string_current_a_{n}"] = total * (1 - 0.125) / 6
+    return frame
+
+
+def test_a_standing_offset_reports_no_change_from_its_own_baseline() -> None:
+    """The false-alarm fix, in one assertion.
+
+    Measured against a theoretical even 1/7, string 7 is 12% deficient in every
+    window ever scored. Two evaluation cases read exactly that and committed to
+    `string_outage` — on a soiling case and a seasonal-derating case, the second
+    a false alarm on a look-alike, which is the failure this project exists to
+    prevent.
+    """
+    frame = _plant_with_a_standing_offset()
+    result = run_tool(
+        "per_mppt_current_balance",
+        context_for(frame),
+        {"start": "2017-03-15T00:00:00Z", "end": "2017-03-29T00:00:00Z"},
+    )
+
+    # Still honestly below even — the tool does not hide it.
+    assert result.values["lowest_string_share"] == pytest.approx(0.125, abs=0.005)
+    # But unchanged against its own history, which is the discriminating fact.
+    assert result.values["lowest_string_share_change"] == pytest.approx(0.0, abs=1e-3)
+    assert result.values["largest_share_drop"] == pytest.approx(0.0, abs=1e-3)
+    assert "No string sits below its own baseline." in result.summary
+
+
+def test_a_string_that_actually_fails_shows_a_fall_from_baseline() -> None:
+    frame = _plant_with_a_standing_offset()
+    hurt = frame.copy()
+    failed = hurt.index >= "2017-03-20"
+    hurt.loc[failed, "string_current_a_3"] = (
+        hurt.loc[failed, "string_current_a_3"] * 0.2
+    )
+
+    result = run_tool(
+        "per_mppt_current_balance",
+        context_for(hurt),
+        {"start": "2017-03-15T00:00:00Z", "end": "2017-03-29T00:00:00Z"},
+    )
+    assert result.values["largest_drop_string_index"] == 3.0
+    assert result.values["largest_share_drop"] > 0.05
+    assert "largest fall from baseline is string 3" in result.summary
+
+
+def test_no_history_says_so_rather_than_reporting_no_change() -> None:
+    """ "No baseline" and "no change" must not look the same."""
+    frame = _plant_with_a_standing_offset(days=20)
+    result = run_tool(
+        "per_mppt_current_balance",
+        context_for(frame),
+        {"start": "2017-01-01T00:00:00Z", "end": "2017-01-15T00:00:00Z"},
+    )
+    assert "largest_share_drop" not in result.values
+    assert any("no history before this window" in c for c in result.caveats)

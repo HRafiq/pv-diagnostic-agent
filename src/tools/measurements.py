@@ -273,6 +273,36 @@ class BalanceArgs(WindowArgs):
     )
 
 
+def _reference_shares(
+    ctx: ToolContext,
+    args: BalanceArgs,
+    currents: list[str],
+    window: pd.DataFrame,
+) -> pd.Series | None:
+    """Each string's mean share over the record before this window.
+
+    `None` when there is not enough history to compare against, which the
+    caller turns into a caveat rather than a silent zero — "no baseline" and
+    "no change" must not look the same.
+    """
+    start = window.index.min()
+    history = ctx.frame.loc[ctx.frame.index < start]
+    if len(history) < len(window):
+        return None
+
+    lit = pd.to_numeric(history.get("poa_wm2"), errors="coerce") >= args.min_poa_wm2
+    if not lit.any():
+        return None
+    block = history.loc[lit, currents].apply(pd.to_numeric, errors="coerce")
+    totals = block.sum(axis=1)
+    floor = 0.2 * float(totals.median()) if len(totals) else 0.0
+    usable = totals > max(floor, 1e-6)
+    if usable.sum() < 100:
+        return None
+    reference: pd.Series = block[usable].div(totals[usable], axis=0).mean()
+    return reference
+
+
 def per_mppt_current_balance(ctx: ToolContext, args: BalanceArgs) -> ToolResult:
     window = slice_window(ctx.frame, args.start, args.end)
     currents, _ = string_columns(window)
@@ -312,6 +342,24 @@ def per_mppt_current_balance(ctx: ToolContext, args: BalanceArgs) -> ToolResult:
 
     shares = block[usable].div(totals[usable], axis=0).mean()
     even = 1.0 / len(currents)
+
+    # The same shares over the record *before* this window.
+    #
+    # An even 1/n is a theoretical reference, not this array's. On the NIST
+    # system string 7 carries about 0.12 against an even 0.143 in untouched
+    # data — a smaller combiner, or a fault that predates the record. Measured
+    # against 1/n it is 16% deficient in every window ever scored, and the
+    # evaluation showed exactly what that costs: G-004 and G-005 both read
+    # "the lowest share is string 7 at 0.12" and committed to `string_outage`,
+    # on cases whose true causes were soiling and seasonal derating. One was a
+    # false alarm on a look-alike, which is the failure this project exists to
+    # prevent.
+    #
+    # A string's own history is the reference that separates a standing offset
+    # from something that just failed. This is a second measurement, not a
+    # threshold and not a judgement: the tool reports the change and the agent
+    # decides what it means.
+    baseline = _reference_shares(ctx, args, currents, window)
     deviations = (shares - even).abs()
     worst_column = str(deviations.idxmax())
     worst_index = int(worst_column.rsplit("_", 1)[-1])
@@ -353,6 +401,48 @@ def per_mppt_current_balance(ctx: ToolContext, args: BalanceArgs) -> ToolResult:
         }
     )
 
+    baseline_note = ""
+    if baseline is not None:
+        change = shares - baseline
+        dropped_column = str(change.idxmin())
+        dropped_index = int(dropped_column.rsplit("_", 1)[-1])
+        values.update(
+            {
+                f"baseline_share_string_{str(c).rsplit('_', 1)[-1]}": float(v)
+                for c, v in baseline.items()
+            }
+        )
+        values.update(
+            {
+                f"share_change_string_{str(c).rsplit('_', 1)[-1]}": float(v)
+                for c, v in change.items()
+            }
+        )
+        values.update(
+            {
+                "largest_share_drop": float(-change.min()),
+                "largest_drop_string_index": float(dropped_index),
+                "lowest_string_baseline_share": float(baseline[lowest_column]),
+                "lowest_string_share_change": float(change[lowest_column]),
+            }
+        )
+        fall = -float(change.min())
+        # Compared at the precision the sentence prints. A share that moved by
+        # 1e-9 is float noise, and "the largest fall is string 1, down 0.0000"
+        # asserts a fall while displaying none — the same failure the grounding
+        # tolerance exists to avoid, in the other direction.
+        largest = (
+            f"The largest fall from baseline is string {dropped_index}, "
+            f"down {fall:.4f}."
+            if round(fall, 4) > 0
+            else "No string sits below its own baseline."
+        )
+        baseline_note = (
+            f" Against its own history, string {lowest_index} carried "
+            f"{baseline[lowest_column]:.3f} before this window, so it has moved "
+            f"{change[lowest_column]:+.4f}. " + largest
+        )
+
     hours_note = ""
     if args.hour_start is not None or args.hour_end is not None:
         hours_note = (
@@ -367,7 +457,7 @@ def per_mppt_current_balance(ctx: ToolContext, args: BalanceArgs) -> ToolResult:
             f"{lowest_index} at {shares.min():.3f} against an even "
             f"{even:.3f}; {below_10} strings sit more than 10% below even and "
             f"{below_25} more than 25% below. Scored over "
-            f"{int(usable.sum())} well-lit intervals{hours_note}."
+            f"{int(usable.sum())} well-lit intervals{hours_note}." + baseline_note
         ),
         values=values,
         labels={
@@ -380,6 +470,21 @@ def per_mppt_current_balance(ctx: ToolContext, args: BalanceArgs) -> ToolResult:
             "string equally leaves them flat and is invisible here",
             "shares sum to one, so strings losing current push the rest above "
             "the even share — read which strings are low, not which moved most",
+            *(
+                [
+                    "an even share is a theoretical reference, not this "
+                    "array's: a string can sit below it for the whole record "
+                    "without anything having failed. The change from its own "
+                    "baseline is what separates a standing offset from a new "
+                    "fault"
+                ]
+                if baseline is not None
+                else [
+                    "no history before this window to compare against, so a "
+                    "string below the even share cannot be told apart from one "
+                    "that has been low since the record began"
+                ]
+            ),
         ],
     )
 

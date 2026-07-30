@@ -583,3 +583,81 @@ def test_a_held_back_split_that_was_run_is_still_judged() -> None:
     assert targets["false_alarm_rate_at_most_0.15"] is False
     # But the gap genuinely needs both splits.
     assert targets["overfitting_gap_at_most_0.10"] is None
+
+
+def test_a_cache_served_run_is_not_quoted_as_a_price() -> None:
+    """G-017 came back "$0.288, 0s" and both halves were wrong.
+
+    Its prompts matched an earlier run, so every call was replayed from the
+    response cache: it spent nothing and took no wall clock, while reporting the
+    original run's cost. Averaging that into the medians reports a price nobody
+    paid at a speed nobody achieved.
+    """
+    fresh = [
+        Prediction(
+            case_id=f"F{n}",
+            category="fault",
+            cause="string_outage",
+            settled=True,
+            cost_usd=0.65,
+            latency_ms=180_000,
+            llm_calls=12,
+            cached_calls=0,
+        )
+        for n in range(2)
+    ]
+    replayed = Prediction(
+        case_id="C",
+        category="fault",
+        cause="shading",
+        settled=True,
+        cost_usd=0.288,
+        latency_ms=0,
+        llm_calls=11,
+        cached_calls=11,
+    )
+    assert replayed.served_from_cache
+    assert not fresh[0].served_from_cache
+
+    agency = measure_agency([*fresh, replayed])
+    assert agency["median_cost_usd"] == 0.65
+    assert agency["median_latency_ms"] == 180_000
+    assert agency["runs_served_from_cache"] == 1
+    # It still counts as a run — it produced an answer and a trajectory.
+    assert agency["completed_runs"] == 3
+
+
+def test_an_entirely_cached_sweep_reports_no_price_rather_than_zero() -> None:
+    """ "free" and "not measured" are different claims."""
+    agency = measure_agency(
+        [
+            Prediction(
+                case_id="C",
+                category="fault",
+                cause="shading",
+                settled=True,
+                cost_usd=0.288,
+                llm_calls=11,
+                cached_calls=11,
+            )
+        ]
+    )
+    assert agency["median_cost_usd"] is None
+    assert agency["median_latency_ms"] is None
+    assert agency["runs_served_from_cache"] == 1
+
+
+def test_a_partially_cached_run_still_counts_as_priced() -> None:
+    """Only a run where *every* call was replayed spent nothing."""
+    partial = Prediction(
+        case_id="P",
+        category="fault",
+        cause="shading",
+        settled=True,
+        cost_usd=0.40,
+        latency_ms=90_000,
+        llm_calls=11,
+        cached_calls=4,
+    )
+    assert not partial.served_from_cache
+    assert measure_agency([partial])["median_cost_usd"] == 0.4

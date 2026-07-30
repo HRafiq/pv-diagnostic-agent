@@ -329,6 +329,8 @@ def run_agent_engine(
                 critic_cycles=out.state.cycle,
                 cost_usd=out.cost_usd,
                 latency_ms=elapsed_ms,
+                llm_calls=out.llm_calls,
+                cached_calls=out.cached_calls,
             )
         )
         scores.append(score_case(case, predictions[-1]))
@@ -338,6 +340,12 @@ def run_agent_engine(
             f"{len(out.unplanned_tools)} unplanned, "
             f"${out.cost_usd:.3f}, {elapsed_ms / 1000:.0f}s, "
             f"{'settled' if predictions[-1].settled else 'not enough evidence'}"
+            + (
+                f"  [{out.cached_calls} of {out.llm_calls} call(s) replayed from "
+                f"cache — ${out.cached_cost_usd:.3f} not spent again]"
+                if out.cached_calls
+                else ""
+            )
         )
         if out.ungrounded_numbers:
             print(f"         UNGROUNDED FIGURES: {out.ungrounded_numbers}")

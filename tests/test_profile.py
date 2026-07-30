@@ -14,21 +14,38 @@ from typing import Any
 from eval.profile import profile_run, profile_traces, render, summary
 
 
-def a_step(kind: str, node: str, cycle: int, ms: int, usd: float) -> dict[str, Any]:
+def a_step(
+    kind: str, node: str, cycle: int, ms: int, usd: float, index: int = 0
+) -> dict[str, Any]:
     return {
         "kind": kind,
         "node": node,
         "args": {"cycle": cycle},
         "result": "x",
         "was_planned": True,
-        "step_index": 0,
+        "step_index": index,
         "tokens": 100,
         "cost_usd": usd,
         "latency_ms": ms,
     }
 
 
-def write_trace(path: Path, rows: list[dict[str, Any]]) -> Path:
+def numbered(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Stamp sequential indices, as `TraceWriter` does.
+
+    The helper used to leave every step at index 0. That was invisible until
+    `split_attempts` started reading a non-increasing index as a run boundary —
+    at which point a fixture that never happens in reality made a real feature
+    look broken.
+    """
+    for n, row in enumerate(rows):
+        row["step_index"] = n
+    return rows
+
+
+def write_trace(path: Path, rows: list[dict[str, Any]], renumber: bool = True) -> Path:
+    if renumber:
+        rows = numbered(rows)
     path.write_text("\n".join(json.dumps(r) for r in rows))
     return path
 
@@ -131,3 +148,34 @@ def test_the_report_names_what_the_measure_time_actually_is(tmp_path: Path) -> N
     write_trace(tmp_path / "INV-D.jsonl", a_run(cycles=1))
     report = render(profile_traces(tmp_path))
     assert "none of this time is the physics" in report
+
+
+def test_a_rerun_appended_to_the_same_file_is_split_into_two(tmp_path: Path) -> None:
+    """`TraceWriter` opens with mode "a" and the evaluation names traces after
+    the case, so re-running a case appends to the file it wrote last time.
+
+    Read naively, `INV-G-004` reported 59 measurements, 4 cycles and $3.37 —
+    while the run that wrote its last entries took 11 measurements and cost
+    $0.34. Every per-run figure was a session's worth of attempts summed
+    together. `step_index` restarts at zero per writer, so the boundary is
+    exact rather than inferred.
+    """
+    first = numbered(a_run(cycles=2))
+    second = numbered(a_run(cycles=1))
+    write_trace(tmp_path / "INV-G-004.jsonl", first + second, renumber=False)
+
+    profiles = profile_traces(tmp_path)
+    assert [p.investigation_id for p in profiles] == [
+        "INV-G-004 #1",
+        "INV-G-004 #2",
+    ]
+    assert profiles[0].cycles == 2
+    assert profiles[1].cycles == 1
+    assert profiles[1].measurements == 6
+    # The second attempt is not carrying the first's cost.
+    assert round(profiles[1].usd, 3) == 0.43
+
+
+def test_a_single_attempt_keeps_its_plain_name(tmp_path: Path) -> None:
+    write_trace(tmp_path / "INV-G-010.jsonl", a_run(cycles=1))
+    assert profile_traces(tmp_path)[0].investigation_id == "INV-G-010"

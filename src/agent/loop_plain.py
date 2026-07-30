@@ -75,6 +75,13 @@ class InvestigationResult:
     llm_calls: int = 0
     cost_usd: float = 0.0
     latency_ms: int = 0
+    # Calls served from the response cache, and what they would have cost.
+    # `cost_usd` still includes them, because the figure means "what this
+    # investigation costs to run" — but a re-run that hits the cache spent none
+    # of it, and reporting $0.29 against 0 seconds of wall clock without saying
+    # why is how a cache hit gets quoted as a price.
+    cached_calls: int = 0
+    cached_cost_usd: float = 0.0
     trace_path: Path | None = None
     stopped_because: str = "completed"
 
@@ -97,6 +104,9 @@ def _accrue(target: InvestigationResult, response: LLMResponse | None) -> None:
     target.llm_calls += 1
     target.cost_usd += response.cost_usd
     target.latency_ms += response.latency_ms
+    if response.cached:
+        target.cached_calls += 1
+        target.cached_cost_usd += response.cost_usd
 
 
 # How many times the router may ask for knowledge it already has before the

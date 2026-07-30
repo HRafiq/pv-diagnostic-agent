@@ -258,6 +258,9 @@ def test_a_failed_case_is_scored_not_fatal(
             unplanned_tools=[],
             state=SimpleNamespace(cycle=1),
             cost_usd=0.01,
+            llm_calls=4,
+            cached_calls=0,
+            cached_cost_usd=0.0,
             ungrounded_numbers=[],
         )
 
@@ -399,6 +402,9 @@ def test_isolated_failures_do_not_trip_the_breaker(
             unplanned_tools=[],
             state=SimpleNamespace(cycle=1),
             cost_usd=0.01,
+            llm_calls=4,
+            cached_calls=0,
+            cached_cost_usd=0.0,
             ungrounded_numbers=[],
         )
 

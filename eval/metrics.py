@@ -39,11 +39,24 @@ class Prediction:
     critic_cycles: int = 0
     cost_usd: float = 0.0
     latency_ms: int = 0
+    llm_calls: int = 0
+    cached_calls: int = 0
     # Set when the case never produced an answer — an API failure, a truncated
     # reply, an unhandled error. It still scores as unsettled, because that is
     # what it was; but it is not something the agent *chose*, and the agency
     # metrics must not read it as one.
     failed_with: str | None = None
+
+    @property
+    def served_from_cache(self) -> bool:
+        """Every LLM call came from the response cache.
+
+        Such a run spent nothing and took almost no wall clock, so quoting its
+        cost as a price — or its latency as a speed — is wrong in both
+        directions at once. It is excluded from the cost and latency medians and
+        counted separately.
+        """
+        return self.llm_calls > 0 and self.cached_calls == self.llm_calls
 
     @property
     def abstained(self) -> bool:
@@ -308,6 +321,11 @@ def measure_agency(predictions: list[Prediction]) -> dict[str, Any]:
         return {}
 
     ran = [p for p in predictions if p.failed_with is None]
+    # A cache-served run spent nothing and took no wall clock. Averaging it into
+    # the cost and latency medians reports a price nobody paid at a speed nobody
+    # achieved — G-017 came back "$0.288, 0s" and both halves were wrong.
+    priced = [p for p in ran if not p.served_from_cache]
+    cached_runs = len(ran) - len(priced)
     if not ran:
         return {
             "runs": len(predictions),
@@ -319,8 +337,8 @@ def measure_agency(predictions: list[Prediction]) -> dict[str, Any]:
     trajectories = Counter(tuple(p.tools_called) for p in ran)
     with_unplanned = sum(1 for p in ran if p.unplanned_tools)
     cycles = Counter(p.critic_cycles for p in ran)
-    costs = sorted(p.cost_usd for p in ran)
-    latencies = sorted(p.latency_ms for p in ran)
+    costs = sorted(p.cost_usd for p in priced)
+    latencies = sorted(p.latency_ms for p in priced)
 
     def median(values: list[Any]) -> Any:
         return values[len(values) // 2] if values else 0
@@ -334,8 +352,12 @@ def measure_agency(predictions: list[Prediction]) -> dict[str, Any]:
         "unplanned_measurement_rate": round(with_unplanned / len(ran), 4),
         "iteration_distribution": dict(sorted(cycles.items())),
         "self_initiated_abstentions": sum(1 for p in ran if p.abstained),
-        "median_cost_usd": round(median(costs), 4),
-        "median_latency_ms": median(latencies),
+        # Over the runs that actually spent something. `None` rather than 0.0
+        # when every run was cached, because "free" and "not measured" are
+        # different claims.
+        "median_cost_usd": round(median(costs), 4) if priced else None,
+        "median_latency_ms": median(latencies) if priced else None,
+        "runs_served_from_cache": cached_runs,
         "mean_tools_per_run": round(
             sum(len(p.tools_called) for p in ran) / len(ran), 2
         ),

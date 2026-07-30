@@ -2480,3 +2480,115 @@ is not. The test here is whether the reader can act on it: this one names a
 parameter of a class in a transitive dependency, on a code path this repository
 does not touch. Nobody reading a run summary can do anything with it, and a
 warning nobody can act on trains people to ignore the ones they can.
+
+---
+
+## 0078 — What the profiler measured, and what it corrected (2026-07-29)
+
+The first real answer to "where do the ten minutes go", from 13 timed runs
+totalling 13,625 seconds and $21.87:
+
+| node | calls | seconds | share | usd |
+| --- | --- | --- | --- | --- |
+| synthesiser | 59 | 6833 | **50.2%** | 10.99 |
+| planner | 91 | 3052 | 22.4% | 5.72 |
+| router + measure | 397 | 1988 | 14.6% | 3.66 |
+| look up | 164 | 1321 | **9.7%** | 0.78 |
+| review | 44 | 0 | — | — |
+
+**The estimate was directionally right and wrong in the detail.** "About 80% is
+the Sonnet nodes" — measured, planner plus synthesiser is 72.6%. But the
+synthesiser *alone* is half of everything, which no estimate had said, and it is
+the node nobody proposed touching. Router turns came in at 14.6% against a
+guessed ~15%, the one number the estimate got right.
+
+**Look-ups are not free.** 164 calls and 1321 seconds — 9.7%, not the rounding
+error they were assumed to be. G-007 is the extreme: 20 look-ups, 990 seconds,
+**89.8% of that entire run**. Each is a router turn, and repeats are common.
+
+**Review is still unmeasured, not zero.** All 44 review steps predate the fix
+that writes review cost onto the step, so the table reports 0.0s with a flag
+rather than a figure. The claim "review is roughly a third of the run" remains
+unverified — the profiler's job here was to say so rather than to average zeros
+into a total.
+
+**48% of everything was spent after cycle 1** — 6490 of 13625 seconds, $10.72 of
+$21.87 — on runs where four cases had the right answer in cycle 1 and were sent
+back. That is the convergence-stop argument, now with a number behind it.
+
+**The correction the profiler needed.** `TraceWriter` opens with mode `"a"` and
+the evaluation names every trace after the case, so re-running a case appends to
+the file it wrote last time. `INV-G-004` reported 59 measurements, 4 cycles and
+$3.37 while the run that wrote its last entries took 11 measurements and cost
+$0.34: every per-run figure was a session of attempts summed together.
+`split_attempts` cuts on `step_index` restarting at zero, which is exact rather
+than inferred, and repeated attempts are labelled `#1`, `#2`. The totals were
+always right; the per-run rows were not.
+
+---
+
+## 0079 — An even share is not this array's baseline (2026-07-29)
+
+**The false alarms had one cause.** Across every log: string 7 at 0.125, 0.116,
+0.124, 0.124, 0.126 — in five different months, against an even 1/7 = 0.143.
+That is the plant, not a fault. `per_mppt_current_balance` measured every window
+against the theoretical even share, so string 7 read as 12–19% deficient every
+time it was scored, and the summary led with *"the lowest share is string 7 at
+0.116"*.
+
+G-004 and G-005 both read that sentence and committed to `string_outage`. Their
+true causes were soiling and seasonal derating, and G-005 is a look-alike, so it
+is a false alarm — a crew dispatched to a healthy array, which is the failure
+this project exists to prevent. Two of the three cause errors in the eight-case
+run, from one sentence.
+
+**The tool already knew.** Its own source comment says the plant "has a string
+that sits persistently ~12% below even in untouched data" and computes
+`below_10` and `below_25` so the agent can tell a standing offset from a
+failure. The information was in `values` and absent from the sentence the agent
+reads. Knowing something in a comment is not the same as saying it.
+
+**The fix is a second measurement, not a threshold.** Each string's share is now
+compared against its own share over the record *before* the window, and the
+summary reports the change:
+
+```
+standing offset:  string 7 carried 0.125 before this window, so it has moved
+                  +0.0000. No string sits below its own baseline.
+real outage:      string 3 carried 0.146 before this window, so it has moved
+                  -0.0725. The largest fall from baseline is string 3, down 0.0725.
+```
+
+No classification, no rule — the tool reports the change and the agent decides.
+The even share is still reported, because a genuine outage is visible in both.
+
+Where there is not enough history the tool says so in a caveat rather than
+reporting no change: "no baseline" and "no change" must not look the same.
+
+The "largest fall" claim is compared at the precision the sentence prints. A
+share that moved by 1e-9 is float noise, and *"the largest fall is string 1, down
+0.0000"* asserts a fall while displaying none.
+
+---
+
+## 0080 — A cache hit is not a price (2026-07-29)
+
+G-017 in the eight-case run reported **`$0.288, 0s`**. Both halves are wrong
+together: its prompts matched an earlier run, so every call was replayed from
+the response cache. It spent nothing, took no wall clock, and reported the
+original run's cost.
+
+`LLMResponse.cached` existed and nothing downstream read it, so the cache
+docstring's promise that "cost figures stay honest" was half true — the flag was
+set and never consulted.
+
+Now `InvestigationResult` carries `cached_calls` and `cached_cost_usd`, the
+per-case line says `[11 of 11 call(s) replayed from cache — $0.288 not spent
+again]`, and `measure_agency` computes cost and latency medians over the runs
+that actually spent something. A run where *every* call was replayed is counted
+in `runs_served_from_cache` and excluded from those two medians; a partially
+cached run still counts as priced, because it did pay.
+
+When every run was cached the medians report `None` rather than 0.0. "Free" and
+"not measured" are different claims, and this module has now made that mistake
+twice — once with the v1 targets (DECISION 0065) and once here.
