@@ -2,32 +2,65 @@
 
 What the evaluation actually showed, published whichever way it fell.
 
-Everything here is reproducible from a clean checkout:
+The baseline, the physics, the fault injector and the retrieval table are
+reproducible bitwise from a clean checkout, with no API key:
 
 ```bash
 python -m src.data.cli ingest --system 4902 --years 2016 2017
 python -m eval.runner build
 python -m eval.runner run --engine rules --split both
+python -m eval.runner retrieval
 python -m eval.runner compare --split heldback
 ```
+
+The agent numbers are not, and it would be convenient to leave that unsaid.
+They need a key, and `CLAUDE.md#determinism` scopes what reproducibility means
+here: physics, tools, injection and retrieval are bitwise identical for the same
+seed; the planner, router, synthesiser and critic are **not**, and never will be
+— `temperature` no longer exists on current Claude models. Re-running the agent
+gives a similar answer, not the same one. Every agent figure below is one run
+per case unless it says otherwise, and that is stated wherever such a figure
+appears.
 
 ---
 
 ## Status
 
-**The agent has not been scored yet.** No `ANTHROPIC_API_KEY` was available in
-the environment this was built in, so every number below comes from the rules
-baseline, the physics, or the fault injector — all of which run without one.
+**The agent has been run on eight tuning cases. It has not been scored.** Those
+are different claims and the difference is the whole point of this section.
 
-That is stated first because a half-finished evaluation is exactly the kind of
-thing that gets quietly presented as a whole one. The harness, the golden set,
-the metrics and the comparison are complete and tested; the agent column is
-empty because it has not been run, not because it is pending analysis.
+| | eight tuning cases, `--checks-only` |
+| --- | --- |
+| Overall accuracy | 0.700 |
+| Cause accuracy | 0.875 |
+| **False alarms on look-alikes** | **0.000** |
+| Correct "not enough evidence" | 1.000 |
+| Missed real faults | 0.000 |
+| Median cost / latency | $0.36 / 196s |
 
-To fill it in:
+**Do not quote those.** Three independent reasons, each sufficient on its own:
+
+1. **Eight cases is a subset**, and `eval/subset.py` prints so above every run.
+2. **The tools were changed in response to these eight failing.** The
+   string-baseline fix below came directly from watching G-004 and G-005 go
+   wrong. That is tuning, and a number measured on the cases you tuned against
+   is optimistic by construction. `CLAUDE.md` forbids tuning against the
+   held-back set for exactly this reason; the tuning set is where tuning is
+   *supposed* to happen, and the cost is that its number stops being a score.
+3. **Only one of the two improvements is attributable.** G-005 read the
+   corrected string figure and moved off `string_outage`, which is the predicted
+   mechanism. G-029 also improved, but took a different measurement path —
+   it ran `check_night_offset`, which it had skipped before — so it may simply
+   have varied. LLM nodes are not deterministic (`CLAUDE.md#determinism`) and
+   one run per case cannot separate a fix from a coin.
+
+What would make it a score: the full tuning split, then the held-back split,
+reported separately with the gap stated.
 
 ```bash
 cp .env.example .env          # add ANTHROPIC_API_KEY
+python -m eval.runner run --engine agent --split tuning \
+    --checks-only --resume runs/tuning.jsonl
 python -m eval.runner compare --split heldback --out docs/comparison.json
 ```
 
@@ -188,17 +221,105 @@ missing completeness to 1.0, so a window where the performance ratio *could not
 be computed at all* passed the data-quality check and was diagnosed as a string
 fault. Six telemetry-gap cases per split were mislabelled on that alone.
 
+### The second batch, found once the agent actually ran
+
+Everything above was found before a single LLM call was made. Running the agent
+found a second set, and they share a shape worth naming: **thirteen build steps
+produced a suite that passed while the LLM path had never executed once.** A
+green suite says the code on that disk works. It does not say the repository
+does.
+
+**An even share is not this array's baseline.** Combiner 7 — already flagged
+under *Still open* as unresolvable without a maintenance log — carries about 12%
+less than its neighbours across the entire record. Two tools measured against a
+theoretical even 1/7 and reported that standing characteristic as a deficit in
+every window ever scored. G-004 and G-005 both read "the lowest share is string
+7" and committed to `string_outage`; their true causes were soiling and seasonal
+derating, and the second is a false alarm on a look-alike. Both tools now
+compare each string against its own history: a permanent offset reads −0.003
+where a real fault on the same string reads −0.297.
+
+**The provenance ledger overwrote itself.** Keys were `{tool}.{value}`, so a
+tool run twice kept only the last call. One case ran `per_mppt_current_balance`
+four times over different windows and had the six figures its answer quoted from
+the first two reported as fabricated — the *more* thoroughly a case was
+measured, the less grounded it looked, and unsupported claims are a hard veto.
+
+**A fall printed as a rise.** `characterize_onset` computed `before - after` and
+emitted it as a signed "change", so a metric going 0.891 → 0.794 read "a change
+of +0.097" in a field named `absolute_change`. Its own test asserted `> 0.1` on
+a drop, so the test agreed with the bug.
+
+**A streamed error arrives inside a 200.** The SDK raises a mid-stream failure
+against the *stream's* HTTP response, which succeeded, so an `overloaded_error`
+reached the retry logic as a bare `APIStatusError` with `status_code == 200` and
+was classified as permanent. Two correct changes — retry by status code, and
+stream every call because the token ceilings made non-streaming illegal — left a
+blind spot between them that nothing tested, because no test built the exception
+the streaming path actually raises.
+
+**The critic could not see its own previous review.** Its prompt held the brief,
+the causes, the evidence, the draft and the look-alike checklist, and nothing
+about what it had asked for last time — while the planner and synthesiser both
+received the revision request. Information flowed one way. Every review was a
+fresh reviewer with unlimited standards and no memory, so it re-raised answered
+objections and could not notice the answer had stopped changing. Four cases
+reached the right cause and were talked out of it.
+
+**Traces concatenated across runs.** `TraceWriter` opens with mode `"a"` and the
+evaluation names traces after the case, so re-running appends. `INV-G-004`
+reported 59 measurements and $3.37 while the run that wrote its last lines took
+11 and cost $0.34.
+
+**A cache hit was quoted as a price.** A replayed run reported the original
+call's cost against zero seconds of wall clock. `LLMResponse.cached` existed and
+nothing downstream read it.
+
+**Review cost was never written to the tape.** It was accrued to the run total
+and omitted from the trace step, so the node whose value is most in question
+appeared free to anything reading a trace.
+
+**The category was an LLM decision that is a dictionary lookup.**
+`fault_signatures.yaml` assigns a category to every cause; the synthesiser chose
+both independently and could contradict a file it had been shown. One case in
+eight named the right cause and filed it in the wrong bucket.
+
+The general lesson, since it recurred: **half of these were invisible until
+something was built to look at data that had already been recorded.** The
+evaluation harness is not only for producing scores — `profile` and `explain`
+both exist because a number was wrong and nothing could say why.
+
 ---
 
 ## Still open
 
-- **The agent has not been run.** Everything above is baseline and physics.
-- **Retrieval has not been ablated.** The knowledge layer is switchable
-  (`--no-knowledge`) and untested against accuracy.
-- **The critic has not been priced.** `--no-review` runs the identical loop
-  without it.
+- **The agent has not been scored.** Eight tuning cases have been run, and they
+  are the cases the tools were tuned against. See *Status*.
+- **Retrieval has not been ablated, and is not in the loop.** `investigate`
+  defaults to the hand-written `KnowledgeBase` — a dictionary lookup on cause
+  names — so every "looked up what is known about…" line in every run log is
+  that lookup, not retrieval. `CorpusRetriever` is built, tested, measurably
+  better than BM25 alone, and constructed by nothing. The corpus is also 23
+  chunks and *is* the knowledge base. Making the claim real needs real
+  documents behind it.
+- **The LLM reviewer has been priced on one case, not measured.** G-017 with it
+  took 644–900s and $1.09–1.31 and ended on "not enough evidence"; with
+  `--no-review` it answered correctly in 165s for $0.29. That is n=1 on the case
+  the reviewer had already failed three times. Across every case seen so far it
+  has improved one answer and talked four correct ones out of themselves, which
+  is why `--checks-only` exists — the deterministic half of review kept, the
+  judgement dropped.
+- **Whether the reasoning is sound, as opposed to the evidence being correct.**
+  G-004 is the open case, and reading it in full is uncomfortable: the agent
+  stated the right discriminator unprompted ("a string outage shows exactly one
+  step"), measured it three times, got three answers pointing at soiling, and
+  cited none of them — quoting instead a figure from the same sentence as the
+  disconfirming one. Fixing tools raises the floor. It does not establish that
+  the reasoning above the floor is reliable.
 - **Combiner 7.** Unresolvable without a maintenance log, and a live example of
-  why `not_enough_evidence` needs to be a first-class answer.
+  why `not_enough_evidence` needs to be a first-class answer. It is also the
+  direct cause of the standing-offset bug above: a real plant characteristic
+  that two tools reported as a fault.
 
 ---
 
@@ -258,6 +379,15 @@ without it. The numbers above say retrieval finds the right passage; they say
 nothing about whether the agent diagnoses better for having read it. If it turns
 out not to, the layer should come out.
 
+**And a larger caveat, which belongs here rather than in a footnote:
+`CorpusRetriever` is not wired into any run.** `investigate` defaults to the
+hand-written `KnowledgeBase`, so the ablation as it stands would compare a
+dictionary lookup against no dictionary lookup. The corpus is also 23 chunks and
+those chunks *are* the knowledge base, so the table above measures finding the
+right entry among 23 items that could equally be fetched by key. The stack works
+and is measurably better than BM25 alone; it is not doing the job the word RAG
+implies, and saying so costs a talking point.
+
 ---
 
 ## The two experiments (step 11)
@@ -266,8 +396,16 @@ out not to, the layer should come out.
 python -m eval.runner experiments --runs 3 --split heldback
 ```
 
-**Not run.** Both need an API key. The harness is complete and tested; what
-follows is what it will report and why it is built that way.
+**Not run at scale.** The harness is complete and tested, and one case has been
+run through the "no review" arm by hand (see *Still open*). What follows is what
+the experiments will report and why they are built that way.
+
+Since they were designed, review gained a third mode. `--no-review` remains the
+control — a clean single pass, because a control that quietly does some of the
+work is not a control — and `--checks-only` keeps the deterministic half (no
+fabricated numerics, every look-alike weighed, no abstention naming a tool the
+agent owns and did not run) while dropping the LLM judgement. The interesting
+comparison is now three-way rather than two.
 
 ### Reported as mean ± spread, never as one number
 
@@ -298,11 +436,18 @@ two rows attributable to the layer rather than to the implementation.
 
 ### What each one answers
 
-**"no review" prices the critic.** The critic is the most expensive node per
-investigation and the one whose value is easiest to assert and hardest to show.
-The number to read is `correct_abstention_rate`: the critic's whole job is
-refusing to accept an answer that has not excluded its look-alikes, so if
-abstention does not move when it is removed, it is decoration.
+**"no review" prices the critic.** The critic is the one whose value is easiest
+to assert and hardest to show. The number to read is `correct_abstention_rate`:
+its whole job is refusing to accept an answer that has not excluded its
+look-alikes, so if abstention does not move when it is removed, it is
+decoration.
+
+The measured profile complicates the premise. Across 13 timed runs the
+synthesiser is **50.2%** of all latency and the planner **22.4%**; review's own
+cost was never written to the trace, so it is unmeasured rather than small. What
+*is* measured is that **48% of all time and half of all spend went after cycle
+1** — the re-review loop — on runs where four cases had the right answer in
+cycle 1 and were sent back.
 
 **"no knowledge" prices retrieval.** Step 9 established that the right passage
 comes back. This establishes whether the agent diagnoses better for having read
