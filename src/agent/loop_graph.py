@@ -44,13 +44,14 @@ from __future__ import annotations
 import contextlib
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from src.agent.llm import BudgetExceeded, LLMClient
 from src.agent.loop_plain import (
     _MAX_UNPRODUCTIVE_LOOKUPS,
     Critic,
     InvestigationResult,
+    ReviewMode,
     _accrue,
     _apply_exclusions,
     _build_finding,
@@ -97,7 +98,7 @@ class _Run:
         brief: str,
         default_args: dict[str, str],
         knowledge: Retriever | KnowledgeBase,
-        critic: Critic | None | Literal[False],
+        critic: Critic | None | ReviewMode,
         max_tools_per_cycle: int,
         writer: TraceWriter | None,
         out: InvestigationResult,
@@ -121,6 +122,7 @@ class _Run:
         self.previous_verdict: Any = None
         self.previous_cause: str | None = None
         self.measurements_at_last_review = 0
+        self.checks_only_repair = False
         self.router_turns = 0
         self.stop_decision: RouterDecision | None = None
 
@@ -395,6 +397,26 @@ def build_graph(run: _Run, checkpointer: Any | None = None) -> Any:
 
         # Same convergence stop as the plain loop, which is the specification.
         mechanical = inspect_draft(state, run.out.results, synthesis)
+
+        # Deterministic checks without the reviewer. See loop_plain for why the
+        # two halves are separable and which one the evidence points at keeping.
+        if run.critic == "checks":
+            run.checks_only_repair = False
+            if mechanical.clean:
+                return state
+            # Increment then test, as the plain loop does.
+            state.cycle += 1
+            if state.cap_reached:
+                run.out.errors.extend(mechanical.unsupported)
+                run.out.stopped_because = (
+                    "the arithmetic checks still objected at the cycle cap, and "
+                    "there is no reviewer to repair it"
+                )
+                return state
+            run.revision_request = mechanical.as_request()
+            run.checks_only_repair = True
+            return state
+
         if (
             run.previous_verdict is not None
             and run.previous_cause is not None
@@ -529,6 +551,8 @@ def build_graph(run: _Run, checkpointer: Any | None = None) -> Any:
         return "look_up" if decision.action == "look_up" else "execute"
 
     def after_review(state: AgentState) -> str:
+        if run.critic == "checks":
+            return "replan" if run.checks_only_repair else "done"
         verdict = state.verdicts[-1]
         if verdict.verdict in ("accept", "not_enough_evidence"):
             return "done"
@@ -592,7 +616,7 @@ def investigate_with_graph(
     max_cycles: int = 4,
     max_tools_per_cycle: int | None = None,
     trace_root: Path | str | None = None,
-    critic: Critic | None | Literal[False] = None,
+    critic: Critic | None | ReviewMode = None,
     knowledge: Retriever | KnowledgeBase | None = None,
     on_step: Callable[[TraceStep], None] | None = None,
 ) -> InvestigationResult:

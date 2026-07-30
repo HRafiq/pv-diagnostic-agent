@@ -57,6 +57,9 @@ __all__ = ["Critic", "InvestigationResult", "investigate"]
 # loop without review, which is how the critic's own contribution is measured.
 Critic = Callable[[AgentState, list[ToolResult], Synthesis], CriticVerdict]
 
+# "checks" runs the deterministic half of review without the LLM reviewer.
+ReviewMode = Literal[False, "checks"]
+
 
 @dataclass
 class InvestigationResult:
@@ -132,7 +135,7 @@ def investigate(
     max_cycles: int = 4,
     max_tools_per_cycle: int | None = None,
     trace_root: Path | str | None = None,
-    critic: Critic | None | Literal[False] = None,
+    critic: Critic | None | ReviewMode = None,
     knowledge: Retriever | KnowledgeBase | None = None,
     on_step: Callable[[TraceStep], None] | None = None,
 ) -> InvestigationResult:
@@ -152,10 +155,11 @@ def investigate(
             question it was actually asked. G-017 spent all eight on coverage,
             reached 7/7, and then declined to answer — naming `string_onset_scan`
             as what would resolve it, a tool it owns and had not run.
-        critic: `None` uses the LLM critic; a callable substitutes one; `False`
-            runs with no review at all, which is the ablation that says whether
-            the critic earns its cost. A `send_back` verdict replans with the
-            critic's instruction in hand.
+        critic: `None` uses the LLM critic; a callable substitutes one;
+            `"checks"` runs the deterministic half without the reviewer; `False`
+            runs with no review at all, which is the control the ablation is
+            measured against. A `send_back` verdict replans with the critic's
+            instruction in hand.
         knowledge: Where the agent's background evidence comes from. Defaults
             to the hand-written knowledge base; pass a `CorpusRetriever` to use
             retrieval over the document corpus instead, or an empty
@@ -505,8 +509,45 @@ def investigate(
             )
 
             # ---------------- review ----------------------------------------
+            # Three modes, because the critic node does two separable things.
+            #
+            #   None       the LLM reviewer, plus the deterministic checks
+            #   "checks"   the deterministic checks only
+            #   False      nothing at all — the ablation's control
+            #
+            # Only the reviewer is expensive, and only the reviewer has a record
+            # of destroying correct answers: four cases reached the right cause
+            # and were talked out of it. "checks" is what that evidence points
+            # at shipping — the guarantees that need no model (no fabricated
+            # numerics, every look-alike weighed, no abstention naming an unrun
+            # tool) kept, the judgement dropped.
+            #
+            # `False` stays a clean single pass. It is the control the ablation
+            # is measured against, and a control that quietly does some of the
+            # work is not a control.
             if critic is False:
                 break
+
+            if critic == "checks":
+                objections = inspect_draft(state, out.results, synthesis)
+                if objections.clean:
+                    break
+                # Increment *then* test the cap, matching the reviewer path
+                # exactly. Testing first would give this mode one more cycle
+                # than the other for the same `max_cycles`, and the ablation
+                # would be comparing two different budgets.
+                state.cycle += 1
+                if state.cap_reached:
+                    out.errors.extend(objections.unsupported)
+                    out.stopped_because = (
+                        "the arithmetic checks still objected at the cycle cap, "
+                        "and there is no reviewer to repair it"
+                    )
+                    break
+                # A repair the arithmetic can specify on its own. No model asked,
+                # so the guarantees survive without the reviewer's cost.
+                revision_request = objections.as_request()
+                continue
 
             # Convergence, decided by arithmetic rather than by a model.
             #

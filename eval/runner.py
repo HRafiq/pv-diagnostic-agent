@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import time
+import warnings
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -152,7 +153,7 @@ def run_agent_engine(
     cases: list[Any],
     trace_root: Path | None = None,
     max_tools_per_cycle: int | None = None,
-    review: bool = True,
+    review: bool | str = True,
     use_knowledge: bool = True,
     verbose: bool = True,
     resume_from: Path | None = None,
@@ -243,7 +244,11 @@ def run_agent_engine(
                 end=case.end,
                 trace_root=root,
                 max_tools_per_cycle=max_tools_per_cycle,
-                critic=None if review else False,
+                critic=(
+                    None
+                    if review is True
+                    else ("checks" if review == "checks" else False)
+                ),
                 knowledge=knowledge,
                 on_step=printer,
             )
@@ -369,7 +374,11 @@ def _run_engine(
     )
     return run_agent_engine(
         cases,
-        review=not getattr(args, "no_review", False),
+        review=(
+            "checks"
+            if getattr(args, "checks_only", False)
+            else not getattr(args, "no_review", False)
+        ),
         use_knowledge=not getattr(args, "no_knowledge", False),
         verbose=not getattr(args, "quiet", False),
         resume_from=(Path(args.resume) if getattr(args, "resume", None) else None),
@@ -709,6 +718,13 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # LangGraph's checkpoint package emits a pending-deprecation notice about a
+    # serialiser default we neither construct nor configure. It began appearing
+    # in this CLI's output the moment the runner started importing the graph,
+    # where it sits above the run and looks like something the operator did.
+    # Filtered by message so a real deprecation from anywhere else still shows.
+    warnings.filterwarnings("ignore", message=".*allowed_objects.*", category=Warning)
+
     parser = argparse.ArgumentParser(prog="pv-eval")
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -793,7 +809,20 @@ def main(argv: list[str] | None = None) -> int:
     p_run.add_argument(
         "--no-review",
         action="store_true",
-        help="Agent only: skip the critic. The ablation that prices review.",
+        help=(
+            "Agent only: no review at all. The control the ablation is measured "
+            "against."
+        ),
+    )
+    p_run.add_argument(
+        "--checks-only",
+        action="store_true",
+        help=(
+            "Agent only: keep the deterministic checks — no fabricated "
+            "numerics, every look-alike weighed, no abstention naming an unrun "
+            "tool — and drop the LLM reviewer. Cheaper and faster than a full "
+            "review without giving up the guarantees."
+        ),
     )
     p_run.add_argument(
         "--no-knowledge",

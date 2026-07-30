@@ -2415,3 +2415,68 @@ that survives a reader checking.
 The pattern across all three is worth naming: each number was written when it was
 a plan, and stayed after it became false. Nothing re-checked them because nothing
 had run end to end.
+
+---
+
+## 0076 — Review splits into a reviewer and a set of checks (2026-07-29)
+
+**The measurement.** G-017 with `--no-review`, the first end-to-end correct
+result this project has produced:
+
+| | answer | cost | wall clock |
+| --- | --- | --- | --- |
+| with the LLM reviewer | not enough evidence ✗ | $1.09–$1.31 | 644–900s |
+| `--no-review` | **`settled: shading`** ✓ | **$0.288** | **165s** |
+
+Correct, four times cheaper, four times faster. n=1, and it is one case the
+reviewer had already failed three times, so it is the least surprising case for
+this to happen on. It is still the sharpest evidence available.
+
+**The conclusion is not "delete the critic".** Reading the ablation carefully
+shows what it actually removed: `critic=False` broke *before* the deterministic
+checks as well as the reviewer, so that correct answer carried no guarantee its
+figures were grounded or its look-alikes weighed. It happened to have done both
+— eight measurements covering all seven checklist lines — but a configuration
+worth shipping cannot rest on happening to.
+
+The critic node does two separable things:
+
+1. **Checks that need no model.** No fabricated numerics, every look-alike
+   weighed, no abstention naming a tool the agent owns and did not run. Free,
+   deterministic, already factored out as `inspect_draft`.
+2. **A judgement.** Expensive, slow, and with a record of four correct answers
+   destroyed against one improved.
+
+The evidence points at keeping 1 and dropping 2. So review now has three modes:
+`None` (reviewer plus checks), `"checks"` (checks alone, with a repair cycle the
+arithmetic specifies through `MechanicalObjections.as_request`), and `False`
+(nothing).
+
+**`False` stays exactly as it was**, and that matters more than it looks. It is
+the control the ablation is measured against, and a control that quietly does
+some of the work is not a control. An earlier version of this change redefined
+`False` to include the checks; it broke eight tests, and the tests were right.
+
+The cap is tested *after* the cycle increment in the new mode, matching the
+reviewer path, so `--checks-only` and the default run on the same cycle budget.
+An ablation comparing two different budgets compares nothing.
+
+---
+
+## 0077 — A dependency's warning is not the operator's problem (2026-07-29)
+
+LangGraph's checkpoint package emits a `LangChainPendingDeprecationWarning`
+about an `allowed_objects` serialiser default that this project neither
+constructs nor configures. It began appearing in CLI output the moment the
+runner started importing the graph (DECISION 0072), where it sits above the run
+and reads as something the operator did wrong.
+
+Filtered in `eval/runner.main`, by **message** rather than by category or
+module, so a genuine deprecation from anywhere else still surfaces. Verified
+both ways: absent from CLI output, still raised when the filter is not applied.
+
+Suppressing a warning is usually the wrong instinct and worth justifying when it
+is not. The test here is whether the reader can act on it: this one names a
+parameter of a class in a transitive dependency, on a code path this repository
+does not touch. Nobody reading a run summary can do anything with it, and a
+warning nobody can act on trains people to ignore the ones they can.

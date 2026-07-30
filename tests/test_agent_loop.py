@@ -1544,3 +1544,96 @@ def test_convergence_still_refuses_a_fabricated_figure(
     # convergence path must not take it.
     assert len(seen) >= 2
     assert "converged" not in out.stopped_because
+
+
+# ===========================================================================
+# Review has three modes, and the control must stay a control
+# ===========================================================================
+def test_checks_only_keeps_the_guarantees_without_a_reviewer(
+    ctx: ToolContext, clock: FrozenClock
+) -> None:
+    """What D's result actually points at shipping.
+
+    G-017 answered correctly with `--no-review` in 165s for $0.29, against
+    644-900s and ~$1.10 with the reviewer. But `--no-review` also skipped the
+    deterministic checks, so that answer came with no guarantee its figures were
+    grounded or its look-alikes weighed — it happened to have done both. A
+    configuration worth shipping cannot rest on happening to.
+    """
+    invented = a_settled_answer(
+        answer="One string sits at 0.4213 of its neighbours.",
+        summary="One string sits at 0.4213 of its neighbours.",
+    )
+    client = ScriptedClient(
+        replies={
+            "planner": [a_plan(_COVERING_PLAN), a_plan(["profile_data_quality"])],
+            "router": [
+                *(a_call(name) for name in _COVERING_PLAN),
+                a_stop(),
+                a_call("profile_data_quality"),
+                a_stop(),
+            ],
+            # The figure is repaired on the second pass.
+            "synthesizer": [invented, a_settled_answer()],
+        }
+    )
+    out = investigate(
+        "q", ctx, client, clock, investigation_id="INV-CHECKS", critic="checks"
+    )
+
+    # It went round again on the arithmetic alone — no reviewer was called.
+    assert out.state.cycle == 1
+    assert out.state.verdicts == [], "no verdict means no LLM reviewer ran"
+    assert out.synthesis is not None and out.synthesis.settled
+    assert out.ungrounded_numbers == []
+
+
+def test_checks_only_asks_for_the_repair_the_arithmetic_can_name(
+    ctx: ToolContext, clock: FrozenClock
+) -> None:
+    """The instruction comes from `MechanicalObjections`, not from a model."""
+    client = ScriptedClient(
+        replies={
+            "planner": [a_plan(["check_ac_ceiling"]), a_plan(["weather_context"])],
+            "router": [
+                a_call("check_ac_ceiling"),
+                a_stop(),
+                a_call("weather_context"),
+                a_stop(),
+            ],
+            "synthesizer": [a_settled_answer(), a_settled_answer()],
+        }
+    )
+    out = investigate(
+        "q",
+        ctx,
+        client,
+        clock,
+        investigation_id="INV-REPAIR",
+        critic="checks",
+        max_cycles=2,
+    )
+    # The look-alike checklist is not covered by two tools, so it replanned and
+    # then stopped at the cap saying so rather than silently accepting. The
+    # counter lands on `max_cycles` because the cap is tested after the
+    # increment — the same order the reviewer path uses.
+    assert out.state.cycle == 2
+    assert "no reviewer to repair it" in out.stopped_because
+
+    replan = [s for s in out.steps if s.kind == "plan"]
+    assert len(replan) == 2
+
+
+def test_no_review_stays_a_single_pass(ctx: ToolContext, clock: FrozenClock) -> None:
+    """The ablation's control. A control that quietly does some of the work is
+    not a control, so `False` must keep meaning nothing at all."""
+    out = run(
+        [a_plan(["check_ac_ceiling"])],
+        [a_call("check_ac_ceiling"), a_stop()],
+        [a_settled_answer()],
+        ctx,
+        clock,
+    )
+    assert out.state.cycle == 0
+    assert out.state.verdicts == []
+    assert len([s for s in out.steps if s.kind == "plan"]) == 1
