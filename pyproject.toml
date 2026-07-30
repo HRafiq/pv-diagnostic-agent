@@ -1,0 +1,83 @@
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pv-diagnostic-agent"
+version = "0.1.0"
+description = "Differential-diagnosis agent for solar PV plant performance deficits"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    # --- core ---------------------------------------------------------------
+    "pydantic==2.11.7",
+    "pydantic-settings==2.10.1",
+    "python-dotenv==1.1.1",
+    "pyyaml==6.0.2",
+
+    # --- data / physics -----------------------------------------------------
+    "numpy==2.2.6",
+    "pandas==2.3.1",
+    "scipy==1.15.3",
+    "pvlib==0.13.0",
+    "requests==2.32.4",
+    # pandas needs an engine to read or write parquet and does not depend on
+    # one itself. The ingest layer stores every system as parquet, so without
+    # this the whole data path raises ImportError on a clean install.
+    "pyarrow==19.0.1",
+
+    # --- agent --------------------------------------------------------------
+    # >= 0.77.0 is a hard floor, not a preference: `output_config`
+    # (which carries both `effort` and the structured-output `format`)
+    # did not exist on messages.create before it, and every agent call
+    # sends it. tests/test_llm_request.py pins that the installed SDK
+    # accepts what src/agent/llm.py builds.
+    "anthropic==0.120.0",
+    # LangGraph is the step 12 port, kept as a core dependency so the
+    # equivalence test runs in CI rather than being skipped.
+    "langgraph==0.6.7",
+
+    # --- dashboard (FastAPI + Jinja2 + Alpine.js/Plotly.js from static) -----
+    "fastapi==0.116.1",
+    "uvicorn[standard]==0.35.0",
+    "jinja2==3.1.6",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==8.4.1",
+    "pytest-cov==6.2.1",
+    "ruff==0.12.5",
+    "mypy==1.17.0",
+    "pandas-stubs==2.3.0.250703",
+    "types-pyyaml==6.0.12.20250516",
+    "types-requests==2.32.4.20250611",
+    "httpx==0.28.1",
+]
+
+[project.scripts]
+pv-watcher = "watcher:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src", "simulator", "eval"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+filterwarnings = ["error::DeprecationWarning:src.*"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+plugins = ["pydantic.mypy"]
+warn_unreachable = true
+
+[[tool.mypy.overrides]]
+module = ["pvlib.*"]
+ignore_missing_imports = true

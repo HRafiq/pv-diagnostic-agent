@@ -1,0 +1,142 @@
+# Site geometry, model choices, and detector thresholds.
+#
+# ANTI-CIRCULARITY RULE (CLAUDE.md): this file configures the *expectation*
+# model only — the coarse stack the agent uses to form a prediction. The fault
+# simulator is configured separately in simulator/ with a deliberately
+# different, more detailed stack. If the two ever share a configuration, every
+# injected deficit becomes trivially detectable and the evaluation is worthless.
+
+# --------------------------------------------------------------------------
+# Sites
+# --------------------------------------------------------------------------
+# UNVERIFIED until step 1 — coordinates, tilt, azimuth and array ratings are
+# placeholders to be replaced with the values shipped in the DKASC metadata.
+sites:
+  dkasc_alice_springs:
+    name: "Desert Knowledge Australia Solar Centre, Alice Springs"
+    latitude: -23.7621
+    longitude: 133.8744
+    altitude_m: 576.0
+    # ACST, UTC+09:30. The Northern Territory does not observe DST, which is a
+    # deliberate advantage: no spring-forward gap to corrupt a daily energy
+    # total and no ambiguous hour in the autumn.
+    timezone: "Australia/Darwin"
+    # Surface reflectance. 0.20 is the generic default; desert sand runs higher
+    # (0.25-0.35) and materially changes rear-side and diffuse-on-tilt terms.
+    albedo: 0.25
+    source: "https://dkasolarcentre.com.au/"
+
+# --------------------------------------------------------------------------
+# Expectation model — deliberately the COARSE stack
+# --------------------------------------------------------------------------
+expectation_model:
+
+  # PVWatts DC model: P_dc = (G_poa / 1000) * P_dc0 * (1 + gamma_pdc * (T_cell - 25))
+  # One free parameter beyond the nameplate. It is a weaker model than SAPM or
+  # the CEC single-diode model, and that is the point — the simulator uses one
+  # of those, so the agent's expectation is genuinely independent of the truth.
+  dc_model: pvwatts
+  pvwatts:
+    # Temperature coefficient of maximum power, per °C. -0.0035 to -0.0045 is
+    # the normal range for crystalline silicon; -0.0034 is typical of a modern
+    # PERC/TOPCon module. This is the single most important number for
+    # separating a real fault from summer derating: at 60 °C cell temperature,
+    # a healthy module is already down 0.0034 * 35 = 11.9% from its STC rating.
+    gamma_pdc: -0.0034
+
+  # Faiman cell-temperature model:
+  #   T_cell = T_amb + G_poa / (u0 + u1 * wind_speed)
+  # Chosen over the SAPM temperature model because it needs only ambient
+  # temperature and wind speed — no module-specific coefficient set — so it
+  # degrades gracefully when a dataset lacks measured module temperature.
+  temperature_model: faiman
+  faiman:
+    u0: 25.0   # W/(m^2 K), combined constant heat-transfer component
+    u1: 6.84   # W s/(m^3 K), wind-dependent component
+  # Fallback used only where measured module temperature exists and we want to
+  # cross-check the Faiman estimate. Never both in the same computation.
+  sapm_temperature_preset: open_rack_glass_polymer
+
+  # Sandia inverter model needs a full parameter set; PVWatts needs only the
+  # nominal AC rating and a peak efficiency. Coarse on purpose, as above.
+  ac_model: pvwatts
+  pvwatts_inverter:
+    eta_inv_nom: 0.96
+
+  # Plane-of-array transposition. Perez is the most accurate of the common
+  # sky-diffuse models and matters here because a mis-transposed POA looks
+  # exactly like an under-performing array in winter, when the diffuse
+  # fraction and the incidence angle are both high.
+  transposition_model: perez
+  # Direct-normal from GHI, when the dataset supplies only global horizontal.
+  # DIRINT beats DISC on sub-hourly data because it uses the dew point and the
+  # temporal stability of the clearness index.
+  dni_from_ghi_model: dirint
+  # Angle-of-incidence reflection losses. b0 = 0.05 is the ASHRAE default for
+  # glass; it is worth ~2-3% of annual yield and is invisible if you skip it.
+  iam_model: ashrae
+  ashrae_b0: 0.05
+  # Clear-sky model, used by check_clearsky_consistency to catch a drifting or
+  # soiled irradiance sensor. Ineichen with Linke turbidity is the pvlib
+  # default and needs no external data beyond the bundled turbidity climatology.
+  clearsky_model: ineichen
+
+# --------------------------------------------------------------------------
+# Reference conditions
+# --------------------------------------------------------------------------
+stc:
+  irradiance_w_m2: 1000.0
+  cell_temperature_c: 25.0
+  air_mass: 1.5
+
+# --------------------------------------------------------------------------
+# Detector thresholds
+# --------------------------------------------------------------------------
+# Deterministic sweep detectors only. No LLM ever reads or writes these, and
+# the agent cannot change them at runtime.
+thresholds:
+  # Below this POA irradiance the PR denominator gets small and the ratio blows
+  # up. Everything under it is excluded from PR aggregation.
+  pr_min_poa_w_m2: 200.0
+
+  # Temperature-corrected PR deficit that opens an investigation, as a fraction.
+  # 0.05 = 5% below the trailing baseline.
+  pr_deficit_open: 0.05
+  pr_deficit_baseline_days: 30
+
+  # An inverter this many robust standard deviations below the fleet median for
+  # the same period is a candidate equipment fault rather than weather.
+  inverter_vs_fleet_sigma: 3.0
+
+  # Per-MPPT current imbalance. A string out of N on one MPPT shows up as a
+  # step of roughly 1/N in that MPPT's current with the others unchanged.
+  mppt_current_imbalance_frac: 0.08
+
+  # AC ceiling / clipping. Flat-topped power at the inverter's AC rating.
+  clipping_frac_of_ac_rating: 0.98
+  clipping_min_consecutive_intervals: 3
+
+  # Soiling. Typical desert accumulation without rain is 0.1-0.5 %/day; a rain
+  # event over this depth generally restores most of the loss.
+  soiling_rain_reset_mm: 5.0
+  soiling_min_slope_frac_per_day: 0.0005
+
+  # Data quality.
+  max_gap_fraction: 0.05
+  night_power_tolerance_kw: 0.5
+  flatline_min_consecutive_intervals: 12
+
+# --------------------------------------------------------------------------
+# Replay clock — see src/clock.py. There is no free real-time public PV feed,
+# so "now" is a position in a historical dataset.
+# --------------------------------------------------------------------------
+clock:
+  # Inside the ingested record, not after it. "Now" is a position in a
+  # historical dataset, so a start date the data does not cover leaves every
+  # trailing window empty and the Watcher finds nothing, silently.
+  start: "2017-02-01T00:00:00+00:00"
+  # Wall-clock seconds per simulated second when running accelerated. 0 means
+  # the clock only moves when something explicitly advances it (the normal
+  # mode: `watcher.py` steps it one data interval at a time).
+  speed: 0.0
+  step: "1D"

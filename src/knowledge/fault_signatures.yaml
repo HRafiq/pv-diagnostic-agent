@@ -1,0 +1,317 @@
+# What each cause does to a PV plant's telemetry.
+#
+# READ THIS BEFORE ADDING AN ENTRY.
+#
+# This file is *not* a lookup table and must never become one. Nothing here is
+# matched against a measurement by code — no threshold, no scoring, no
+# `if signature.matches(result)`. It is retrieved as evidence for the agent to
+# read and weigh, the same way it reads a tool result, and step 9's ablation
+# has to be able to show that removing it changes accuracy (or does not).
+#
+# The distinction is the whole evaluation. If a signature said
+# "string_outage: worst_deviation_from_even > 0.03" and any code compared that
+# number to a tool's output, the accuracy figure would measure whether this
+# file agrees with `simulator/injectors.py` — two files written by the same
+# person on the same afternoon. It would be near 100% and it would mean
+# nothing.
+#
+# So: no numeric thresholds, ever. Describe *shapes* and *relationships*
+# ("falls on some strings and not others", "recovers after rain", "the ratio
+# rises, which a real loss cannot do"). Where a magnitude genuinely matters,
+# name the physical constant behind it rather than a cut-off — "roughly 0.4%
+# per degree above 25 °C" is physics; "> 8%" is a rule engine in a hat.
+#
+# `distinguishing` names the *other* cause each entry is most often confused
+# with, and the observation that separates them. That field is the useful one.
+# A description of what a fault looks like on its own is nearly worthless; a
+# fault is only ever diagnosed against its nearest look-alike.
+
+version: 1
+
+signatures:
+
+  string_outage:
+    category: fault
+    plain_name: a string or combiner has stopped producing
+    what_happens: >
+      A fuse blows, a connector corrodes open, or a combiner breaker trips. The
+      current on that one channel drops and the rest of the array is untouched.
+    looks_like:
+      - one string's share of total array current steps down while the others
+        rise to fill it, because shares must sum to one
+      - the loss is the same fraction of that string at every hour of the day
+      - irradiance is entirely unaffected
+      - whole-plant output falls by roughly that string's share of the array
+      - it never recovers on its own
+    distinguishing:
+      shading: >
+        A shadow is confined to a band of hours and tracks the sun; a failed
+        string costs the same fraction from first light to last. Narrow the
+        per-string comparison to the suspect hours: if the gap appears only
+        there, it is a shadow.
+      soiling: >
+        Dust sits on every module, so it takes every string down together and
+        leaves the shares flat. A share that moves points at one string.
+      weather: >
+        Cloud dims every string equally and moves the irradiance channel too.
+        A share moving while irradiance holds cannot be weather.
+    action: send someone
+    typical_cost: >
+      One string of N is 1/N of the array's output, lost continuously until
+      someone visits. On a large plant that is the most expensive thing on this
+      list precisely because it is invisible in the monthly total.
+
+  shading:
+    category: fault
+    plain_name: something is casting a shadow on part of the array
+    what_happens: >
+      A new obstruction — a building, a tree line, a row of modules in front,
+      vegetation — blocks direct sun on part of the array for part of the day.
+    looks_like:
+      - the loss appears only within a band of hours and is absent outside it
+      - it tracks time of day rather than irradiance level, so it is present on
+        clear days and clear on cloudy ones
+      - the strings it falls on are depressed and the others are not, but only
+        inside that band
+      - a string's daily *shape* stops matching the array's even when its daily
+        total barely moves
+      - it repeats at the same hours day after day and drifts slowly with the
+        season
+    distinguishing:
+      string_outage: >
+        Compare the same per-string measurement over the whole day and over the
+        suspect hours. A fuse shows the same gap in both; a shadow shows a gap
+        only in the narrowed one.
+      clipping: >
+        Both bend the shape of the day, but clipping flattens the *peak* and
+        shading cuts an *edge*. Clipping also has a ceiling; shading does not.
+    action: send someone, with secateurs rather than spares
+    typical_cost: >
+      Small in energy but permanent and worsening as vegetation grows. Also
+      damages the modules it shades over time through hot-spotting.
+
+  soiling:
+    category: recoverable
+    plain_name: dust or dirt on the modules
+    what_happens: >
+      Airborne dust, pollen, bird droppings or agricultural spray reduce the
+      light reaching the cells. Rain washes most of it off.
+    looks_like:
+      - a slow, roughly linear decline while the weather stays dry
+      - a step recovery after rain, giving a sawtooth rather than a trend
+      - every string affected equally, so the per-string shares stay flat
+      - the irradiance sensor still agrees with the clear-sky model, because the
+        modules are dirty and the pyranometer is not
+      - the loss is the same fraction at every hour of the day
+    distinguishing:
+      sensor_drift: >
+        The decisive one, and the pair that gets a wash crew sent to a clean
+        array. Dirty modules make measured performance *fall*; a dirty sensor
+        makes it *rise*, because the denominator shrinks. Check the sensor
+        against the clear-sky envelope: if the sensor is the one reading low,
+        the array is fine.
+      string_outage: >
+        Soiling is uniform across strings; a failed string is not.
+      weather: >
+        Cloud reduces energy without reducing the performance ratio. Soiling
+        reduces the ratio.
+    action: schedule a wash
+    typical_cost: >
+      A few per cent of annual yield in a temperate climate, much more in an
+      arid one. Recoverable in full, which is what makes it worth scheduling
+      rather than dispatching.
+
+  seasonal_temperature_derating:
+    category: by_design
+    plain_name: the modules are hot
+    what_happens: >
+      Silicon loses roughly 0.4% of its power for every degree the cell sits
+      above 25 °C, and a module in full sun runs 25-30 K above ambient. Nothing
+      is wrong; the plant is behaving exactly as its datasheet says.
+    looks_like:
+      - uncorrected performance ratio falls through the summer and recovers in
+        the autumn, every year, on a healthy plant
+      - temperature-corrected performance ratio stays flat across the same
+        period
+      - the size of the gap matches the module's temperature coefficient times
+        the measured cell temperature rise
+      - it is worst at midday on clear days, which is also when output is
+        highest, so the energy loss looks alarming and is not
+    distinguishing:
+      soiling: >
+        Correct for temperature. If the corrected ratio is flat, it was heat;
+        if the corrected ratio falls too, something else is happening as well.
+      string_outage: >
+        Heat affects every string identically and the shares stay flat.
+    action: do nothing
+    typical_cost: >
+      Nothing recoverable. This is the single most common false alarm in PV
+      monitoring and dispatching for it is pure waste.
+
+  clipping:
+    category: by_design
+    plain_name: the inverter is at its power limit
+    what_happens: >
+      The array can produce more DC than the inverter is rated or configured to
+      export, so the inverter holds output at its ceiling and walks the array
+      off its maximum power point.
+    looks_like:
+      - a flat top on the power channel across the middle of clear days
+      - the plateau sits at a fixed kW value, the same on every day it appears
+      - it appears only on the brightest days and vanishes in cloud
+      - DC power and string currents come down with the AC output, because the
+        inverter backs the array off rather than dumping the energy
+      - it recurs every year at the same season, because it is a property of the
+        equipment and not an event
+    distinguishing:
+      curtailment: >
+        **These are not separable from plant telemetry.** Both hold output at a
+        flat ceiling, both take DC down with AC, and neither leaves any other
+        trace. Separating them needs a record from outside the plant: the grid
+        operator's dispatch log, or the inverter's own configuration history.
+        Saying so is the correct answer, and committing to either one on the
+        power channel alone is wrong even when it happens to be right.
+      string_outage: >
+        A ceiling is a shape at the top of the day; a failed string is a
+        constant fraction lost at every hour, including the ones where the
+        inverter is nowhere near its limit.
+    action: do nothing
+    typical_cost: >
+      Real energy is forgone but it was never available to the inverter, so
+      there is nothing to fix. Worth quantifying only when sizing a repower.
+
+  curtailment:
+    category: not_the_plant
+    plain_name: the grid operator has capped export
+    what_happens: >
+      A network constraint, negative prices, or a dispatch instruction limits
+      how much the plant may export. The inverter obeys.
+    looks_like:
+      - identical to clipping on every channel the plant records
+      - the ceiling may sit anywhere, including well below the inverter's rating
+      - it starts and stops on instruction rather than with the sun, so it can
+        appear on a dull day and vanish on a bright one
+    distinguishing:
+      clipping: >
+        See above. Not separable from plant telemetry. The distinguishing
+        evidence is external and the honest answer names it rather than
+        guessing.
+    action: none at the plant; the question is commercial
+    typical_cost: >
+      Real energy, often compensable under the connection agreement, which is
+      exactly why calling it "clipping" costs money — nobody claims for it.
+
+  sensor_drift:
+    category: not_the_plant
+    plain_name: the irradiance sensor is reading low
+    what_happens: >
+      The pyranometer or reference cell soils, ages, or drifts out of
+      calibration and under-reports the light arriving at the array.
+    looks_like:
+      - performance ratio *rises*, which no real loss can do
+      - measured irradiance falls below the clear-sky envelope on clear days
+        while output holds up
+      - the modelled expectation drops below what the plant actually produces
+      - the drift is gradual and one-directional; a cleaned sensor steps back up
+      - a night-time offset away from zero often accompanies it
+    distinguishing:
+      soiling: >
+        The mirror image, and the one that matters. Soiled modules push the
+        ratio down; a soiled sensor pushes it up. If the ratio improved, stop
+        looking at the array.
+      weather: >
+        Cloud moves the sensor and the plant together and leaves the ratio
+        alone. Drift moves only the sensor.
+    action: wipe or recalibrate the sensor; do not touch the array
+    typical_cost: >
+      No lost energy at all — but every downstream number is wrong until it is
+      fixed, including the ones used to bill an availability guarantee.
+
+  weather:
+    category: not_the_plant
+    plain_name: there was less sun
+    what_happens: >
+      Cloud, haze, smoke or a seasonal shift reduces the light reaching the
+      array. The plant converts what arrives at its normal efficiency.
+    looks_like:
+      - energy is down and the performance ratio is not
+      - measured irradiance is down by the same proportion as the energy
+      - every string is affected identically
+      - insolation for the period is below the same calendar weeks in other
+        years
+    distinguishing:
+      soiling: >
+        Both reduce energy. Only soiling reduces the performance ratio.
+      telemetry_gap: >
+        Cloud leaves a complete record of a dim period; a gap leaves an
+        incomplete record of an unknown one.
+    action: do nothing
+    typical_cost: >
+      Nothing recoverable and nothing to investigate, which is why cheaply
+      dismissing it first is worth doing on every single case.
+
+  telemetry_gap:
+    category: not_the_plant
+    plain_name: the logger stopped recording
+    what_happens: >
+      A data logger, meter or communications link fails while the plant keeps
+      running. Energy disappears from the record, not from the grid.
+    looks_like:
+      - the power channel is missing while the weather station keeps logging
+      - an apparent deficit that is exactly proportional to the missing fraction
+      - the plant's output either side of the gap is entirely normal
+      - performance ratio computed naively across the gap collapses, because the
+        numerator loses intervals the denominator keeps
+    distinguishing:
+      string_outage: >
+        A gap has no data; a fault has data showing a loss. Check completeness
+        before believing any deficit.
+      curtailment: >
+        Both flatten the record. Curtailment records zeros or a ceiling; a gap
+        records nothing at all.
+    action: fix the logger; do not dispatch to the plant
+    typical_cost: >
+      No energy lost, but availability guarantees and settlement both run off
+      this data, so the commercial cost can be large.
+
+  inverter_fault:
+    category: fault
+    plain_name: the inverter is converting badly or has tripped
+    what_happens: >
+      A failing stage, a lost phase, or a derating fault means less AC comes out
+      than the DC going in justifies.
+    looks_like:
+      - the ratio of AC to DC power falls while both channels keep recording
+      - string currents and DC power look entirely normal
+      - it may come and go with temperature or load
+    distinguishing:
+      string_outage: >
+        A failed string takes DC down with AC and leaves the conversion ratio
+        alone. Only an inverter problem moves the ratio between them.
+      clipping: >
+        A power limit also lowers AC, but it lowers DC to match, so the ratio
+        holds.
+    action: send someone
+    typical_cost: >
+      Everything downstream of the inverter, for as long as it lasts.
+
+  snow_or_dust_event:
+    category: recoverable
+    plain_name: snow or a dust storm is covering the modules
+    what_happens: >
+      A discrete weather event covers the array, then clears.
+    looks_like:
+      - an abrupt, near-total loss that is not matched by a loss of irradiance
+        at the sensor, if the sensor is heated or clears first
+      - full recovery within days, without intervention
+      - every string affected together
+      - it coincides with cold or with a known regional event
+    distinguishing:
+      telemetry_gap: >
+        Snow records a real zero from a plant that is producing nothing; a gap
+        records nothing from a plant that may be producing normally.
+      string_outage: >
+        Snow clears by itself. A fuse does not.
+    action: usually nothing; clear it only if it persists
+    typical_cost: >
+      Real but self-resolving in most climates.

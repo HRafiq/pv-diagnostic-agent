@@ -1,0 +1,235 @@
+/* Instrument-panel styling: dense, legible, no decoration that competes with
+   the data.
+
+   Both themes are declared as token sets and swapped by the `data-theme`
+   attribute on <html>. Dark is selected, not derived: its surfaces and inks
+   were chosen for the dark band and validated against it, the same way the
+   chart palette was. */
+
+:root,
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0f1216;
+  --panel: #171b21;
+  --panel-2: #1c2129;
+  --line: #262c35;
+  --ink: #e6e9ee;
+  --ink-dim: #9aa4b2;
+  --accent: #f0a500;
+  --accent-ink: #191919;
+  --ok: #0ca30c;
+  --warn: #fab219;
+  --err: #d03b3b;
+  --shadow: none;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f4f4f2;
+  --panel: #fbfbfa;
+  --panel-2: #f0f0ed;
+  --line: #e3e2df;
+  --ink: #12151a;
+  --ink-dim: #5c6470;
+  --accent: #b87900;
+  --accent-ink: #ffffff;
+  --ok: #0ca30c;
+  --warn: #a06800;
+  --err: #d03b3b;
+  --shadow: 0 1px 2px rgba(16, 20, 26, 0.06);
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+.mono, .clock-value, td.mono, .num {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+
+/* ---- top bar ---- */
+.topbar {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 1rem; padding: 0.7rem 1.25rem;
+  border-bottom: 1px solid var(--line); background: var(--panel);
+}
+.brand { display: flex; align-items: center; gap: 0.6rem; font-weight: 600; }
+.mark {
+  background: var(--accent); color: var(--accent-ink); border-radius: 4px;
+  padding: 0.1rem 0.4rem; font-weight: 700; font-size: 0.85rem;
+  letter-spacing: 0.03em;
+}
+.topbar-right { display: flex; align-items: center; gap: 1.1rem; }
+.clock { display: flex; align-items: baseline; gap: 0.55rem; }
+.clock-label {
+  text-transform: uppercase; letter-spacing: 0.08em;
+  font-size: 0.66rem; color: var(--ink-dim);
+}
+.clock-value { font-size: 0.9rem; }
+
+.theme-toggle {
+  display: inline-flex; align-items: center; gap: 0.4rem;
+  background: var(--panel-2); color: var(--ink);
+  border: 1px solid var(--line); border-radius: 6px;
+  padding: 0.34rem 0.66rem; font: inherit; font-size: 0.82rem; cursor: pointer;
+}
+.theme-toggle:hover { border-color: var(--ink-dim); }
+.theme-label { color: var(--ink-dim); }
+
+/* ---- tabs ---- */
+.tabs {
+  display: flex; gap: 0.25rem; padding: 0 1.25rem;
+  border-bottom: 1px solid var(--line); background: var(--panel);
+}
+.tab {
+  appearance: none; background: none; border: none;
+  border-bottom: 2px solid transparent; color: var(--ink-dim);
+  padding: 0.6rem 0.9rem; font: inherit; font-size: 0.9rem; cursor: pointer;
+}
+.tab:hover:not(:disabled) { color: var(--ink); }
+.tab.is-active { color: var(--ink); border-bottom-color: var(--accent); }
+.tab.is-disabled { opacity: 0.35; cursor: not-allowed; }
+
+/* ---- layout ---- */
+main { padding: 1.1rem 1.25rem 3rem; max-width: 1400px; }
+
+.controls {
+  display: flex; flex-wrap: wrap; gap: 0.9rem; align-items: flex-end;
+  margin-bottom: 1rem;
+}
+.controls label { display: flex; flex-direction: column; gap: 0.22rem; }
+.controls span {
+  font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.07em;
+  color: var(--ink-dim);
+}
+.controls select, .controls input {
+  background: var(--panel); color: var(--ink);
+  border: 1px solid var(--line); border-radius: 5px;
+  padding: 0.34rem 0.5rem; font: inherit; font-size: 0.86rem;
+}
+.loading { color: var(--accent); font-size: 0.8rem; }
+
+.panel {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+  padding: 1rem 1.15rem; margin-bottom: 0.9rem; box-shadow: var(--shadow);
+}
+.panel-tight { padding: 0.75rem 1.15rem; }
+.panel-error { border-color: var(--err); }
+.panel h2 { margin: 0 0 0.4rem; font-size: 1.02rem; font-weight: 600; }
+.lede { margin: 0 0 0.2rem; color: var(--ink-dim); font-size: 0.88rem; max-width: 78ch; }
+
+.chart-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(430px, 1fr));
+  gap: 0.9rem;
+}
+.caption {
+  margin: 0.5rem 0 0; color: var(--ink-dim); font-size: 0.8rem; max-width: 76ch;
+}
+.caption-wide { margin: -0.3rem 0 0.9rem; }
+
+/* ---- stat tiles ---- */
+.tiles {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(165px, 1fr));
+  gap: 0.7rem; margin-bottom: 0.9rem;
+}
+.tile {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+  padding: 0.7rem 0.85rem; display: flex; flex-direction: column; gap: 0.14rem;
+  box-shadow: var(--shadow);
+}
+.tile-warn { border-color: var(--warn); }
+.tile-label {
+  font-size: 0.67rem; text-transform: uppercase; letter-spacing: 0.07em;
+  color: var(--ink-dim);
+}
+.tile-value {
+  font-size: 1.5rem; font-weight: 600; line-height: 1.15;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.tile-note { font-size: 0.74rem; color: var(--ink-dim); }
+
+/* ---- tables ---- */
+.grid { width: 100%; border-collapse: collapse; font-size: 0.85rem; margin-top: 0.7rem; }
+.grid th {
+  text-align: left; color: var(--ink-dim); font-weight: 500;
+  font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.06em;
+  padding: 0.32rem 0.55rem; border-bottom: 1px solid var(--line);
+}
+.grid td { padding: 0.32rem 0.55rem; border-bottom: 1px solid var(--line); }
+.grid tr:last-child td { border-bottom: none; }
+.num { text-align: right; }
+
+.linkish {
+  background: none; border: none; color: var(--accent);
+  padding: 0; font: inherit; font-size: 0.85rem; cursor: pointer;
+  text-decoration: underline;
+}
+
+code {
+  background: var(--panel-2); border-radius: 3px; padding: 0.08rem 0.3rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.85em;
+}
+
+/* ---- the investigation tape ----
+   A vertical run of steps with a rail down the left. The only entry that is
+   coloured differently is the unplanned one: it is the visible evidence that
+   the agent departed from its plan, and it is the whole reason this view
+   exists rather than a summary card. */
+.tape { list-style: none; margin: 0; padding: 0 0 0 1.25rem; border-left: 2px solid var(--line); }
+
+.tape-step { position: relative; padding: 0.35rem 0 1.1rem 0.4rem; }
+.tape-step::before {
+  content: ""; position: absolute; left: -1.72rem; top: 0.85rem;
+  width: 9px; height: 9px; border-radius: 50%;
+  background: var(--panel); border: 2px solid var(--line);
+}
+.tape-plan::before, .tape-answer::before { background: var(--accent); border-color: var(--accent); }
+.tape-adaptive::before { background: var(--warn); border-color: var(--warn); }
+.tape-critic::before { background: var(--ink-dim); border-color: var(--ink-dim); }
+
+.tape-head { display: flex; align-items: baseline; gap: 0.6rem; flex-wrap: wrap; }
+.tape-kind { font-weight: 600; font-size: 0.82rem; letter-spacing: 0.03em; text-transform: uppercase; }
+.tape-adaptive .tape-kind { color: var(--warn); }
+.tape-node { font-size: 0.82rem; color: var(--ink-dim); }
+.tape-cost { margin-left: auto; font-size: 0.78rem; color: var(--ink-dim); font-variant-numeric: tabular-nums; }
+.tape-result { margin: 0.35rem 0 0; white-space: pre-wrap; }
+.tape-why { margin: 0.3rem 0 0; font-size: 0.9rem; color: var(--ink-dim); }
+
+.caveats { margin: 0.4rem 0 0; padding-left: 1.1rem; font-size: 0.85rem; color: var(--ink-dim); }
+.caveats li { margin: 0.15rem 0; }
+
+/* ---- verdict pills ---- */
+.pill {
+  display: inline-block; padding: 0.08rem 0.5rem; border-radius: 999px;
+  font-size: 0.78rem; font-weight: 600;
+  background: var(--panel-2); border: 1px solid var(--line); color: var(--ink);
+}
+.pill-open { border-color: var(--warn); color: var(--warn); }
+.pill-out { border-color: var(--line); color: var(--ink-dim); }
+.pill-unplanned { border-color: var(--warn); color: var(--warn); margin-right: 0.4rem; }
+
+.verdict { display: flex; align-items: baseline; gap: 0.6rem; flex-wrap: wrap; margin: 0.2rem 0 0.7rem; }
+.verdict .muted { color: var(--ink-dim); font-size: 0.9rem; }
+
+/* An unsettled answer is marked on the panel itself, so "we could not tell"
+   never renders with the same authority as a settled diagnosis. */
+.panel-unsettled { border-left: 3px solid var(--warn); }
+
+.causes { margin: 0.2rem 0 0.8rem; padding-left: 1.15rem; }
+.causes li { margin: 0.2rem 0; }
+
+/* ---- watcher findings ---- */
+.finding-head { display: flex; align-items: baseline; gap: 0.75rem; flex-wrap: wrap; }
+.finding-head h2 { margin: 0; }
+.finding-energy {
+  margin-left: auto; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.9rem; font-variant-numeric: tabular-nums;
+}
+.finding-energy .muted { color: var(--warn); font-size: 0.8rem; margin-left: 0.35rem; }
+label.inline { flex-direction: row; align-items: center; gap: 0.45rem; }

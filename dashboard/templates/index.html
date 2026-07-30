@@ -1,0 +1,676 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PV Diagnostic Agent</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/app.css">
+  <!--
+    Vendored, not CDN-loaded: the dashboard has to work offline and the exact
+    versions are pinned so a chart cannot silently change under an evaluation.
+  -->
+  <script src="/static/vendor/plotly-2.35.2.min.js"></script>
+  <script defer src="/static/vendor/alpine-3.14.9.min.js"></script>
+  <script>
+    // Apply the stored theme before first paint, so the page never flashes
+    // the wrong surface on load.
+    (function () {
+      var saved = localStorage.getItem('pv-theme');
+      var prefersLight = window.matchMedia('(prefers-color-scheme: light)').matches;
+      document.documentElement.dataset.theme = saved || (prefersLight ? 'light' : 'dark');
+    })();
+  </script>
+</head>
+<body x-data="shell()" x-init="load()">
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="mark">PV</span>
+      <span>Diagnostic Agent</span>
+    </div>
+
+    <div class="topbar-right">
+      <!--
+        Simulated time, not wall clock. Labelled "replay" because a plant
+        manager reading a 2016 date needs to know why it is not today.
+      -->
+      <div class="clock" x-show="state">
+        <span class="clock-label">replay clock</span>
+        <span class="clock-value" x-text="prettyNow"></span>
+      </div>
+      <button class="theme-toggle" @click="toggleTheme()"
+              :aria-label="'Switch to ' + (theme === 'dark' ? 'light' : 'dark') + ' mode'"
+              :title="'Switch to ' + (theme === 'dark' ? 'light' : 'dark') + ' mode'">
+        <span x-text="theme === 'dark' ? '☀' : '☾'"></span>
+        <span class="theme-label" x-text="theme === 'dark' ? 'Light' : 'Dark'"></span>
+      </button>
+    </div>
+  </header>
+
+  <nav class="tabs">
+    <template x-for="tab in tabs" :key="tab.key">
+      <button class="tab"
+              :class="{ 'is-active': tab.key === active, 'is-disabled': !tab.enabled }"
+              :disabled="!tab.enabled"
+              :title="tab.enabled ? '' : 'Arrives at build step ' + tab.step"
+              @click="active = tab.key"
+              x-text="tab.label"></button>
+    </template>
+  </nav>
+
+  <main>
+    <template x-if="error">
+      <div class="panel panel-error">
+        <h2>Could not load</h2>
+        <p x-text="error"></p>
+      </div>
+    </template>
+
+    <!-- ================= PLANT TAB ================= -->
+    <template x-if="state && active === 'plant'">
+      <div>
+        <div class="controls">
+          <label>
+            <span>Site</span>
+            <select x-model="systemId" @change="loadPlant()">
+              <template x-for="s in state.systems" :key="s.system_id">
+                <option :value="s.system_id" x-text="s.name + ' — ' + s.location"></option>
+              </template>
+            </select>
+          </label>
+          <label>
+            <span>From</span>
+            <input type="date" x-model="startDate" @change="loadPlant()">
+          </label>
+          <label>
+            <span>To</span>
+            <input type="date" x-model="endDate" @change="loadPlant()">
+          </label>
+          <label>
+            <span>Roll up by</span>
+            <select x-model="resolution" @change="loadPlant()">
+              <option value="1D">day</option>
+              <option value="1W">week</option>
+              <option value="1ME">month</option>
+            </select>
+          </label>
+          <span class="loading" x-show="loading">loading…</span>
+        </div>
+
+        <template x-if="!state.systems.length">
+          <div class="panel">
+            <h2>No data ingested yet</h2>
+            <p class="lede">
+              Run <code>python -m src.data.cli ingest --system 4902 --years 2016 2017</code>
+              to download a system from the public NREL PVDAQ archive.
+            </p>
+          </div>
+        </template>
+
+        <template x-if="plant">
+          <div>
+            <!-- headline numbers -->
+            <div class="tiles">
+              <div class="tile">
+                <span class="tile-label">Performance ratio</span>
+                <span class="tile-value" x-text="fmt(plant.summary.pr, 3)"></span>
+                <span class="tile-note">as measured</span>
+              </div>
+              <div class="tile">
+                <span class="tile-label">Corrected for temperature</span>
+                <span class="tile-value" x-text="fmt(plant.summary.pr_temperature_corrected, 3)"></span>
+                <span class="tile-note">
+                  <span x-text="plant.summary.temperature_loss_pct.toFixed(1) + '% of the gap is heat'"></span>
+                </span>
+              </div>
+              <div class="tile">
+                <span class="tile-label">Energy produced</span>
+                <span class="tile-value" x-text="plant.summary.energy_mwh.toLocaleString()"></span>
+                <span class="tile-note">MWh</span>
+              </div>
+              <div class="tile">
+                <span class="tile-label">Below the model</span>
+                <span class="tile-value" x-text="plant.summary.deficit_vs_model_pct.toFixed(2) + '%'"></span>
+                <span class="tile-note">measured vs modelled</span>
+              </div>
+              <div class="tile" :class="{ 'tile-warn': plant.summary.data_completeness_pct < 95 }">
+                <span class="tile-label">Readings present</span>
+                <span class="tile-value" x-text="plant.summary.data_completeness_pct.toFixed(1) + '%'"></span>
+                <span class="tile-note">of daylight intervals</span>
+              </div>
+            </div>
+
+            <div class="panel panel-tight">
+              <p class="lede">
+                <span x-text="plant.system.name"></span> —
+                <span x-text="plant.system.capacity_kw.toFixed(1)"></span> kW,
+                <span x-text="plant.system.module_model"></span> at
+                <span x-text="plant.system.tilt_deg"></span>° tilt facing
+                <span x-text="plant.system.azimuth_deg === 180 ? 'due south' : plant.system.azimuth_deg + '°'"></span>.
+                Temperature coefficient
+                <span x-text="(plant.system.gamma_pdc * 100).toFixed(3)"></span> %/°C,
+                taken from the manufacturer's datasheet rather than fitted to this
+                plant's own output.
+              </p>
+            </div>
+
+            <div class="chart-grid">
+              <div class="panel" id="chart-pr"></div>
+              <div class="panel" id="chart-scatter"></div>
+            </div>
+
+            <div class="panel">
+              <div id="chart-strings"></div>
+              <p class="caption">
+                Strings on one array see the same sunlight, so their shares sit flat
+                near <span x-text="(1 / Math.max(plant.system.string_channels,1)).toFixed(3)"></span>.
+                One dark row is equipment; every row dark on the same day is weather.
+              </p>
+            </div>
+
+            <div class="chart-grid">
+              <div class="panel" id="chart-power"></div>
+              <div class="panel" id="chart-irradiance"></div>
+            </div>
+            <p class="caption caption-wide">
+              Output tracks sunlight. These two panels share a time axis rather than
+              a scale — with two y-axes the crossover can be placed anywhere, so a
+              reader cannot tell a real divergence from a chosen one.
+            </p>
+
+            <div class="panel">
+              <div id="chart-gaps"></div>
+              <template x-if="plant.quality.issues.length">
+                <table class="grid">
+                  <thead>
+                    <tr><th>Problem</th><th>Channel</th><th>Share</th><th>First seen</th></tr>
+                  </thead>
+                  <tbody>
+                    <template x-for="issue in plant.quality.issues.slice(0, 6)" :key="issue.kind + issue.column">
+                      <tr>
+                        <td x-text="issue.kind.replace(/_/g, ' ')"></td>
+                        <td class="mono" x-text="issue.column"></td>
+                        <td class="num" x-text="(issue.fraction * 100).toFixed(2) + '%'"></td>
+                        <td class="mono" x-text="issue.first_seen ? issue.first_seen.slice(0, 10) : '—'"></td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </template>
+            </div>
+
+            <!-- Table view: identity is never carried by colour alone. -->
+            <div class="panel">
+              <button class="linkish" @click="showTable = !showTable"
+                      x-text="showTable ? 'Hide the numbers' : 'Show the numbers'"></button>
+              <template x-if="showTable">
+                <table class="grid">
+                  <thead>
+                    <tr>
+                      <th>Period</th><th>PR</th><th>PR (temp. corrected)</th>
+                      <th>Energy (kWh)</th><th>Cell temp (°C)</th><th>Readings</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <template x-for="row in plant.table.slice(-60)" :key="row.period">
+                      <tr>
+                        <td class="mono" x-text="row.period.slice(0, 10)"></td>
+                        <td class="num" x-text="fmt(row.pr, 3)"></td>
+                        <td class="num" x-text="fmt(row.pr_temperature_corrected, 3)"></td>
+                        <td class="num" x-text="row.energy_kwh.toLocaleString()"></td>
+                        <td class="num" x-text="row.mean_cell_temp_c.toFixed(1)"></td>
+                        <td class="num" x-text="(row.completeness * 100).toFixed(0) + '%'"></td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </template>
+            </div>
+          </div>
+        </template>
+      </div>
+    </template>
+
+    <!-- ================= WATCHER TAB ================= -->
+    <template x-if="state && active === 'watcher'">
+      <div>
+        <template x-if="!watch">
+          <div class="panel"><p class="lede">Loading findings…</p></div>
+        </template>
+
+        <template x-if="watch">
+          <div class="controls">
+            <label class="inline">
+              <input type="checkbox" x-model="showClosed" @change="loadFindings()">
+              <span>Show closed</span>
+            </label>
+            <span class="muted" x-show="watch.counts &amp;&amp; Object.keys(watch.counts).length"
+                  x-text="Object.entries(watch.counts).map(([k, v]) => v + ' ' + k).join(', ')"></span>
+            <span class="loading" x-show="loading">loading…</span>
+          </div>
+        </template>
+
+        <template x-if="watch && !watch.findings.length">
+          <div class="panel">
+            <h2 x-text="showClosed ? 'No findings at all' : 'Nothing open'"></h2>
+            <p class="lede">
+              The Watcher writes to <code x-text="watch.store"></code>; this tab
+              only reads. Nothing here is a live alarm — the replay clock sits at
+              <span class="mono" x-text="watch.now.slice(0, 10)"></span>, so
+              "now" is a position in a historical record.
+            </p>
+            <p class="lede">
+              Sweep with
+              <code>python watcher.py run --until 2016-09-01 --step 14D</code>.
+            </p>
+          </div>
+        </template>
+
+        <template x-if="watch && watch.findings.length">
+          <div>
+            <p class="caption caption-wide">
+              Ranked by energy at stake, with verified figures above unverified
+              ones — an unverified number is a smaller claim and the order says so.
+            </p>
+
+            <template x-for="f in watch.findings" :key="f.identity">
+              <div class="panel" :class="f.settled ? '' : 'panel-unsettled'">
+                <div class="finding-head">
+                  <h2 x-text="f.title"></h2>
+                  <span class="pill" x-text="f.lifecycle"></span>
+                  <span class="finding-energy">
+                    <span x-text="f.energy_at_stake_kwh.toLocaleString(undefined, {maximumFractionDigits: 0})"></span> kWh
+                    <span class="muted" x-show="!f.energy_verified">unverified</span>
+                  </span>
+                </div>
+                <p class="lede mono" x-text="f.scope"></p>
+                <p x-text="f.summary"></p>
+
+                <template x-if="f.settled">
+                  <p class="verdict">
+                    <span class="pill" x-text="prettyCategory(f.category)"></span>
+                    <strong x-text="f.cause"></strong>
+                    <span class="muted" x-show="f.confidence !== null"
+                          x-text="'confidence ' + Number(f.confidence).toFixed(2)"></span>
+                  </p>
+                </template>
+
+                <template x-if="!f.settled">
+                  <div>
+                    <p class="verdict">
+                      <span class="pill pill-open">Not enough evidence</span>
+                      <span>These both fit what was measured:</span>
+                    </p>
+                    <ul class="causes">
+                      <template x-for="c in f.candidate_causes" :key="c.cause">
+                        <li><strong x-text="c.cause"></strong> — <span x-text="c.consequence_if_true"></span></li>
+                      </template>
+                    </ul>
+                    <p class="lede">
+                      <strong>What would settle it:</strong>
+                      <span x-text="f.resolving_measurement"></span>
+                    </p>
+                  </div>
+                </template>
+
+                <p class="lede"><strong>Recommended:</strong> <span x-text="f.recommended_action"></span></p>
+                <p class="caption">
+                  Seen <span x-text="f.history"></span> times, last on
+                  <span class="mono" x-text="f.observed_at.slice(0, 10)"></span>.
+                  Trace <span class="mono" x-text="f.investigation_id"></span>.
+                </p>
+              </div>
+            </template>
+          </div>
+        </template>
+      </div>
+    </template>
+
+    <!-- ================= INVESTIGATE TAB ================= -->
+    <template x-if="state && active === 'investigate'">
+      <div>
+        <template x-if="!runs">
+          <div class="panel">
+            <p class="lede">Loading investigations…</p>
+          </div>
+        </template>
+
+        <template x-if="runs && !runs.investigations.length">
+          <div class="panel">
+            <h2>No investigations yet</h2>
+            <p class="lede">
+              This tab replays what the agent did; it never starts a run. Traces
+              are written to <code x-text="runs.traces_dir"></code> by
+              <code>watcher.py</code> and by the evaluation harness, and they are
+              not committed — they are output, not source.
+            </p>
+            <p class="lede" x-show="!runs.api_key_present">
+              No <code>ANTHROPIC_API_KEY</code> is set, so the agent cannot run.
+              Everything else on this dashboard works without one.
+            </p>
+            <p class="lede">
+              Produce some with
+              <code>python -m eval.runner run --engine agent --split tuning</code>.
+            </p>
+          </div>
+        </template>
+
+        <template x-if="runs && runs.investigations.length">
+          <div>
+            <div class="controls">
+              <label>
+                <span>Investigation</span>
+                <select x-model="runId" @change="loadRun()">
+                  <template x-for="r in runs.investigations" :key="r.id">
+                    <option :value="r.id"
+                            x-text="r.id + ' — ' + (r.title || r.question || '') +
+                                    (r.settled ? '' : '  (not enough evidence)')"></option>
+                  </template>
+                </select>
+              </label>
+              <span class="loading" x-show="loading">loading…</span>
+            </div>
+
+            <template x-if="run">
+              <div>
+                <div class="tiles">
+                  <div class="tile">
+                    <span class="tile-label">Measurements taken</span>
+                    <span class="tile-value" x-text="run.counters.measurements"></span>
+                    <span class="tile-note">by the agent, one at a time</span>
+                  </div>
+                  <div class="tile" :class="{ 'tile-warn': run.counters.unplanned > 0 }">
+                    <span class="tile-label">Outside the opening plan</span>
+                    <span class="tile-value" x-text="run.counters.unplanned"></span>
+                    <span class="tile-note">followed the evidence instead</span>
+                  </div>
+                  <div class="tile">
+                    <span class="tile-label">Review rounds</span>
+                    <span class="tile-value" x-text="run.counters.review_cycles"></span>
+                    <span class="tile-note">answer sent back and redone</span>
+                  </div>
+                  <div class="tile">
+                    <span class="tile-label">Cost</span>
+                    <span class="tile-value" x-text="'$' + run.counters.cost_usd.toFixed(3)"></span>
+                    <span class="tile-note">
+                      <span x-text="run.counters.tokens.toLocaleString()"></span> tokens
+                    </span>
+                  </div>
+                  <div class="tile">
+                    <span class="tile-label">Time spent</span>
+                    <span class="tile-value" x-text="run.counters.seconds.toFixed(1) + 's'"></span>
+                    <span class="tile-note">waiting on the model</span>
+                  </div>
+                </div>
+
+                <!-- the answer -->
+                <template x-if="run.answer">
+                  <div class="panel" :class="run.answer.settled ? '' : 'panel-unsettled'">
+                    <h2 x-text="run.answer.title || 'Answer'"></h2>
+
+                    <template x-if="run.answer.settled">
+                      <p class="verdict">
+                        <span class="pill" x-text="prettyCategory(run.answer.category)"></span>
+                        <strong x-text="run.answer.cause"></strong>
+                        <span class="muted" x-show="run.answer.confidence !== null"
+                              x-text="'confidence ' + Number(run.answer.confidence).toFixed(2)"></span>
+                      </p>
+                    </template>
+
+                    <!--
+                      An unsettled finding shows no single cause and no
+                      confidence. That is not a display choice; a Finding
+                      carrying both cannot be constructed.
+                    -->
+                    <template x-if="!run.answer.settled">
+                      <div>
+                        <p class="verdict">
+                          <span class="pill pill-open">Not enough evidence</span>
+                          <span>The measurements did not separate these:</span>
+                        </p>
+                        <ul class="causes">
+                          <template x-for="c in run.answer.candidate_causes" :key="c.cause">
+                            <li>
+                              <strong x-text="c.cause"></strong>
+                              — <span x-text="c.consequence_if_true"></span>
+                            </li>
+                          </template>
+                        </ul>
+                        <p class="lede">
+                          <strong>What would settle it:</strong>
+                          <span x-text="run.answer.resolving_measurement"></span>
+                        </p>
+                      </div>
+                    </template>
+
+                    <p x-text="run.answer.answer"></p>
+                    <p class="lede">
+                      <strong>Recommended:</strong>
+                      <span x-text="run.answer.recommended_action"></span>
+                    </p>
+
+                    <template x-if="run.answer.ungrounded_figures &&
+                                    run.answer.ungrounded_figures.length">
+                      <p class="panel-error">
+                        Figures with no source measurement behind them:
+                        <span class="mono" x-text="run.answer.ungrounded_figures.join(', ')"></span>
+                      </p>
+                    </template>
+                    <template x-if="run.answer.build_error">
+                      <p class="panel-error" x-text="run.answer.build_error"></p>
+                    </template>
+                  </div>
+                </template>
+
+                <!-- possible causes ledger -->
+                <template x-if="run.possible_causes.length">
+                  <div class="panel">
+                    <h2>Possible causes considered</h2>
+                    <table class="grid">
+                      <thead>
+                        <tr><th>Cause</th><th>If it were true</th><th>Status</th></tr>
+                      </thead>
+                      <tbody>
+                        <template x-for="h in run.possible_causes" :key="h.id">
+                          <tr>
+                            <td x-text="h.cause"></td>
+                            <td x-text="h.consequence_if_true"></td>
+                            <td>
+                              <span class="pill"
+                                    :class="h.status === 'excluded' ? 'pill-out' : 'pill-open'"
+                                    x-text="h.status === 'excluded' ? 'ruled out' : 'still standing'"></span>
+                            </td>
+                          </tr>
+                        </template>
+                      </tbody>
+                    </table>
+                  </div>
+                </template>
+
+                <!-- the tape -->
+                <div class="panel">
+                  <h2>What the agent did</h2>
+                  <ol class="tape">
+                    <template x-for="s in run.steps" :key="s.index">
+                      <li class="tape-step" :class="'tape-' + s.kind">
+                        <div class="tape-head">
+                          <span class="tape-kind" x-text="stepLabel(s)"></span>
+                          <span class="tape-node mono" x-text="s.node"></span>
+                          <span class="tape-cost"
+                                x-show="s.cost_usd > 0"
+                                x-text="'$' + s.cost_usd.toFixed(3)"></span>
+                        </div>
+                        <template x-if="!s.was_planned">
+                          <p class="tape-why">
+                            <span class="pill pill-unplanned">unplanned</span>
+                            <span x-text="s.reason_for_choosing"></span>
+                          </p>
+                        </template>
+                        <p class="tape-result" x-text="s.result"></p>
+                        <template x-if="s.excludes && s.excludes.length">
+                          <p class="tape-why">
+                            ruled out: <span class="mono" x-text="s.excludes.join(', ')"></span>
+                          </p>
+                        </template>
+                        <template x-if="s.args && s.args.caveats && s.args.caveats.length">
+                          <ul class="caveats">
+                            <template x-for="c in s.args.caveats" :key="c">
+                              <li x-text="c"></li>
+                            </template>
+                          </ul>
+                        </template>
+                      </li>
+                    </template>
+                  </ol>
+                </div>
+              </div>
+            </template>
+          </div>
+        </template>
+      </div>
+    </template>
+
+    <!-- ================= PLACEHOLDER TABS ================= -->
+    <template x-if="state && !['plant', 'investigate', 'watcher'].includes(active)">
+      <div class="panel">
+        <h2 x-text="tabLabel(active)"></h2>
+        <p class="lede">
+          Arrives at build step <span x-text="tabStep(active)"></span>.
+        </p>
+      </div>
+    </template>
+  </main>
+
+  <script>
+    function shell() {
+      return {
+        state: null, plant: null, error: null, loading: false,
+        active: 'plant', showTable: false,
+        runs: null, run: null, runId: null,
+        watch: null, showClosed: false,
+        theme: document.documentElement.dataset.theme || 'dark',
+        systemId: null, startDate: '', endDate: '', resolution: '1D',
+
+        get tabs() { return this.state ? this.state.tabs : []; },
+        get prettyNow() {
+          return this.state ? this.state.now.replace('T', ' ').replace('+00:00', ' UTC') : '';
+        },
+        tabLabel(key) { const t = this.tabs.find(t => t.key === key); return t ? t.label : ''; },
+        tabStep(key) { const t = this.tabs.find(t => t.key === key); return t ? t.step : ''; },
+        fmt(v, d) { return (v === null || v === undefined) ? '—' : v.toFixed(d); },
+
+        // No ML vocabulary reaches the interface (CLAUDE.md). "adaptive" is
+        // what the trace calls it; a plant manager reads "unplanned".
+        stepLabel(s) {
+          return {
+            plan: 'Plan',
+            tool: 'Measurement',
+            adaptive: 'Measurement (unplanned)',
+            retrieval: 'Looked something up',
+            critic: 'Review',
+            answer: 'Answer',
+          }[s.kind] || s.kind;
+        },
+        prettyCategory(c) {
+          return {
+            fault: 'Send someone',
+            recoverable: 'Schedule maintenance',
+            by_design: 'Working as designed',
+            not_the_plant: 'Not the plant',
+          }[c] || c || '';
+        },
+
+        toggleTheme() {
+          this.theme = this.theme === 'dark' ? 'light' : 'dark';
+          document.documentElement.dataset.theme = this.theme;
+          localStorage.setItem('pv-theme', this.theme);
+          // Charts are server-rendered specs, so re-fetch to get the palette
+          // validated against the new surface rather than recolouring client-side.
+          if (this.plant) this.loadPlant();
+        },
+
+        async load() {
+          try {
+            const r = await fetch('/api/state');
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            this.state = await r.json();
+            await this.loadRuns();
+            await this.loadFindings();
+            if (this.state.systems.length) {
+              const s = this.state.systems[0];
+              this.systemId = s.system_id;
+              this.startDate = s.start.slice(0, 10);
+              this.endDate = s.end.slice(0, 10);
+              await this.loadPlant();
+            }
+          } catch (e) { this.error = e.message; }
+        },
+
+        async loadRuns() {
+          const r = await fetch('/api/investigations');
+          if (!r.ok) {
+            this.runs = { investigations: [], traces_dir: '(unavailable)',
+                          api_key_present: false };
+            return;
+          }
+          this.runs = await r.json();
+          if (this.runs.investigations.length && !this.runId) {
+            this.runId = this.runs.investigations[0].id;
+            await this.loadRun();
+          }
+        },
+
+        async loadFindings() {
+          this.loading = true;
+          try {
+            const q = this.showClosed ? '?include_closed=true' : '';
+            const r = await fetch('/api/findings' + q);
+            this.watch = r.ok ? await r.json()
+                              : { findings: [], store: '(unavailable)', counts: {}, now: '' };
+          } finally { this.loading = false; }
+        },
+
+        async loadRun() {
+          if (!this.runId) return;
+          this.loading = true;
+          try {
+            const r = await fetch(`/api/investigation/${this.runId}`);
+            if (!r.ok) throw new Error((await r.json()).detail || ('HTTP ' + r.status));
+            this.run = await r.json();
+          } catch (e) { this.error = e.message; }
+          finally { this.loading = false; }
+        },
+
+        async loadPlant() {
+          if (!this.systemId) return;
+          this.loading = true;
+          try {
+            const q = new URLSearchParams({
+              start: this.startDate, end: this.endDate,
+              mode: this.theme, resolution: this.resolution,
+            });
+            const r = await fetch(`/api/plant/${this.systemId}?${q}`);
+            if (!r.ok) throw new Error((await r.json()).detail || ('HTTP ' + r.status));
+            this.plant = await r.json();
+            this.$nextTick(() => this.draw());
+          } catch (e) { this.error = e.message; }
+          finally { this.loading = false; }
+        },
+
+        draw() {
+          const cfg = { displayModeBar: false, responsive: true };
+          const charts = this.plant.charts;
+          for (const [key, id] of Object.entries({
+            pr: 'chart-pr', scatter: 'chart-scatter', strings: 'chart-strings',
+            power: 'chart-power', irradiance: 'chart-irradiance', gaps: 'chart-gaps',
+          })) {
+            const el = document.getElementById(id);
+            if (el && charts[key]) Plotly.react(el, charts[key].data, charts[key].layout, cfg);
+          }
+        },
+      };
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,815 @@
+"""The critic, and the parts of its verdict it does not get to decide.
+
+A critic that returns "looks good" is worse than no critic — it launders an
+unchecked answer as a reviewed one. The tests here are almost all about the same
+property: the critic can be *stricter* than the model wanted, never looser.
+
+Three things are computed rather than accepted:
+
+* unsupported claims come from the deterministic grounding check, so a model
+  cannot clear its own arithmetic;
+* a look-alike counts as checked only if a tool that discriminates it actually
+  ran, so the checklist cannot be ticked by assertion;
+* a verdict that fails the contract becomes `send_back`, because a critic that
+  could not produce a valid verdict has not reviewed anything.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from src.agent.llm import ScriptedClient
+from src.agent.loop_plain import investigate
+from src.agent.nodes.critic import (
+    CRITIC_SCHEMA,
+    inspect_draft,
+    lookalikes_measured,
+    review,
+    unrun_tools_named_in,
+)
+from src.agent.nodes.prompts import lookalike_coverage, lookalike_coverage_text
+from src.agent.nodes.synthesizer import Synthesis
+from src.agent.state import (
+    LOOKALIKE_CHECKLIST,
+    AgentState,
+    CriticVerdict,
+    Hypothesis,
+)
+from src.clock import FrozenClock
+from src.findings.models import CandidateCause
+from src.tools import ToolContext, ToolResult
+from tests.test_agent_loop import (
+    a_call,
+    a_plan,
+    a_settled_answer,
+    a_stop,
+    an_unsettled_answer,
+    run,
+)
+
+ALL_TOOLS = [
+    "compute_temp_corrected_pr",
+    "check_ac_ceiling",
+    "check_clearsky_consistency",
+    "profile_data_quality",
+    "weather_context",
+]
+
+
+def a_verdict(**overrides: Any) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "verdict": "accept",
+        "hypotheses_considered": ["H1", "H2"],
+        "hypotheses_excluded": [
+            {
+                "hypothesis": "H2",
+                "excluded_by": ["compute_temp_corrected_pr"],
+                "reasoning": "the corrected ratio did not move",
+            }
+        ],
+        "hypotheses_still_standing": [],
+        "unsupported_claims": [],
+        "lookalikes_considered": list(LOOKALIKE_CHECKLIST),
+        "revision_request": "",
+    }
+    payload.update(overrides)
+    return payload
+
+
+def a_state(tools: list[str] | None = None) -> AgentState:
+    return AgentState(
+        investigation_id="X",
+        question="q",
+        scope="plant",
+        hypotheses=[
+            Hypothesis(id="H1", cause="string_outage", consequence_if_true="a visit"),
+            Hypothesis(id="H2", cause="weather", consequence_if_true="nothing"),
+        ],
+        planned_tools=list(tools or ALL_TOOLS),
+        tools_called=list(tools if tools is not None else ALL_TOOLS),
+    )
+
+
+def a_synthesis(**overrides: Any) -> Synthesis:
+    fields: dict[str, Any] = {
+        "settled": True,
+        "category": "fault",
+        "cause": "string_outage",
+        "confidence": 0.8,
+        "candidate_causes": [],
+        "resolving_measurement": None,
+        "title": "One string is down",
+        "summary": "One string is producing nothing.",
+        "answer": "One string is producing nothing.",
+        "recommended_action": "send someone",
+        "energy_at_stake_kwh": 0.0,
+    }
+    fields.update(overrides)
+    return Synthesis(**fields)
+
+
+def a_result(tool: str, **values: float) -> ToolResult:
+    return ToolResult(tool=tool, summary=f"{tool} ran", values=dict(values))
+
+
+# ===========================================================================
+# The schema
+# ===========================================================================
+def test_the_critic_has_no_prose_escape_hatch() -> None:
+    """`CriticVerdict` has no free-text verdict field, and neither does this."""
+    assert CRITIC_SCHEMA["properties"]["verdict"]["enum"] == [
+        "accept",
+        "send_back",
+        "not_enough_evidence",
+    ]
+    assert CRITIC_SCHEMA["additionalProperties"] is False
+
+
+def test_the_lookalike_field_is_closed_to_the_checklist() -> None:
+    considered = CRITIC_SCHEMA["properties"]["lookalikes_considered"]
+    assert considered["items"]["enum"] == list(LOOKALIKE_CHECKLIST)
+
+
+# ===========================================================================
+# Look-alike coverage is measured, not asserted
+# ===========================================================================
+def test_a_lookalike_counts_only_if_a_tool_that_discriminates_it_ran() -> None:
+    assert set(lookalikes_measured(["check_ac_ceiling"])) == {"clipping", "curtailment"}
+
+
+def test_claiming_a_lookalike_without_measuring_it_does_not_count() -> None:
+    """Box-ticking is what the checklist exists to stop."""
+    assert lookalikes_measured([]) == []
+
+
+def test_every_lookalike_is_reachable_by_some_tool() -> None:
+    """A checklist item no tool can address makes `accept` unreachable."""
+    every = lookalikes_measured([*ALL_TOOLS, "detect_stuck_channels"])
+    assert set(every) == set(LOOKALIKE_CHECKLIST)
+
+
+def test_the_planner_is_told_the_rule_the_critic_enforces() -> None:
+    """The instruction and the enforcement must be one definition.
+
+    The brief said the look-alikes "MUST BE CONSIDERED"; the critic hard-vetoed
+    `accept` unless a tool from the registry's `discriminates` had run. Those are
+    different requirements, and an agent can satisfy the first completely while
+    failing the second — one case took fifteen measurements, missed exactly one
+    item, and could not be accepted however good its answer.
+    """
+    coverage = lookalike_coverage()
+    assert set(coverage) == set(LOOKALIKE_CHECKLIST)
+
+    # The enforcement is the mapping, item for item.
+    for item, tools in coverage.items():
+        assert tools, f"{item} is unreachable, so accept would be impossible"
+        for tool in tools:
+            assert item in lookalikes_measured([tool])
+        # And nothing outside the mapping satisfies that line.
+        outsiders = [t for t in ALL_TOOLS if t not in tools]
+        assert item not in lookalikes_measured(outsiders)
+
+
+def test_the_brief_names_a_tool_for_every_lookalike() -> None:
+    """A requirement the reader cannot act on is not an instruction.
+
+    Two of the seven are covered by exactly one tool each, so "run something
+    relevant" will not satisfy the checklist by luck.
+    """
+    text = lookalike_coverage_text()
+    for item, tools in lookalike_coverage().items():
+        assert item in text
+        assert any(tool in text for tool in tools)
+
+
+# ===========================================================================
+# The critic tightens, never loosens
+# ===========================================================================
+def test_accept_survives_a_clean_answer() -> None:
+    client = ScriptedClient(replies={"critic": [a_verdict()]})
+    verdict = review(
+        client,
+        a_state([*ALL_TOOLS, "detect_stuck_channels"]),
+        "brief",
+        [a_result("compute_temp_corrected_pr", pr=0.8)],
+        [],
+        a_synthesis(),
+    ).verdict
+    assert verdict.verdict == "accept"
+    assert verdict.unchecked_lookalikes == ()
+
+
+def test_a_fabricated_figure_blocks_an_accept() -> None:
+    """The model does not get to clear its own arithmetic."""
+    client = ScriptedClient(replies={"critic": [a_verdict()]})
+    verdict = review(
+        client,
+        a_state([*ALL_TOOLS, "detect_stuck_channels"]),
+        "brief",
+        [a_result("compute_temp_corrected_pr", pr=0.857)],
+        [],
+        a_synthesis(answer="The performance ratio is 0.4213."),
+    ).verdict
+    assert verdict.verdict == "send_back"
+    assert any("0.4213" in claim for claim in verdict.unsupported_claims)
+    assert verdict.revision_request
+
+
+def test_an_unchecked_lookalike_blocks_an_accept() -> None:
+    """Grounds for sending the answer back on its own."""
+    client = ScriptedClient(replies={"critic": [a_verdict()]})
+    verdict = review(
+        client,
+        a_state(["compute_temp_corrected_pr"]),
+        "brief",
+        [a_result("compute_temp_corrected_pr", pr=0.8)],
+        [],
+        a_synthesis(),
+    ).verdict
+    assert verdict.verdict == "send_back"
+    assert "clipping" in verdict.unchecked_lookalikes
+    assert "never measured against" in (verdict.revision_request or "")
+
+
+def test_declining_to_commit_needs_two_survivors() -> None:
+    client = ScriptedClient(
+        replies={
+            "critic": [
+                a_verdict(
+                    verdict="not_enough_evidence", hypotheses_still_standing=["H1"]
+                )
+            ]
+        }
+    )
+    verdict = review(
+        client, a_state(), "brief", [], [], a_synthesis(settled=False)
+    ).verdict
+    assert verdict.verdict == "send_back"
+    assert "fewer than two" in (verdict.revision_request or "")
+
+
+def test_two_survivors_makes_not_enough_evidence_stand() -> None:
+    """Abstention is a successful outcome, not a failure path."""
+    client = ScriptedClient(
+        replies={
+            "critic": [
+                a_verdict(
+                    verdict="not_enough_evidence",
+                    hypotheses_still_standing=["clipping", "curtailment"],
+                )
+            ]
+        }
+    )
+    verdict = review(
+        client,
+        a_state(),
+        "brief",
+        [],
+        [],
+        a_synthesis(
+            settled=False,
+            cause=None,
+            confidence=None,
+            candidate_causes=[
+                CandidateCause(cause="clipping", consequence_if_true="nothing"),
+                CandidateCause(cause="curtailment", consequence_if_true="claim it"),
+            ],
+            resolving_measurement="check the dispatch log",
+        ),
+    ).verdict
+    assert verdict.verdict == "not_enough_evidence"
+
+
+def test_send_back_always_carries_an_actionable_request() -> None:
+    """'Consider other causes' is not something a loop can act on."""
+    client = ScriptedClient(
+        replies={"critic": [a_verdict(verdict="send_back", revision_request="")]}
+    )
+    verdict = review(client, a_state(), "brief", [], [], a_synthesis()).verdict
+    assert verdict.verdict == "send_back"
+    assert verdict.revision_request
+    assert len(verdict.revision_request) > 30
+
+
+def test_a_synthesis_that_could_not_be_filed_is_an_unsupported_claim() -> None:
+    client = ScriptedClient(replies={"critic": [a_verdict()]})
+    verdict = review(
+        client,
+        a_state([*ALL_TOOLS, "detect_stuck_channels"]),
+        "brief",
+        [],
+        [],
+        a_synthesis(build_error="the answer names no cause"),
+    ).verdict
+    assert verdict.verdict == "send_back"
+    assert "the answer names no cause" in verdict.unsupported_claims
+
+
+def test_an_unusable_verdict_becomes_a_send_back_not_an_accept() -> None:
+    """A critic that cannot produce a valid verdict has not reviewed anything.
+
+    Falling through to accept here would be the exact failure this node exists
+    to prevent.
+    """
+    client = ScriptedClient(replies={"critic": ["I think it reads well."]})
+    verdict = review(client, a_state(), "brief", [], [], a_synthesis()).verdict
+    assert verdict.verdict == "send_back"
+    assert verdict.revision_request
+
+
+# ===========================================================================
+# In the loop
+# ===========================================================================
+# A route sequence that covers every look-alike on the checklist, so an
+# `accept` is actually reachable. Anything shorter is sent back — correctly.
+FULL_SWEEP = [a_call(name) for name in ALL_TOOLS] + [a_stop()]
+
+
+def test_the_loop_uses_the_llm_critic_by_default(
+    ctx: ToolContext, clock: FrozenClock
+) -> None:
+    out = run(
+        [a_plan(ALL_TOOLS)],
+        list(FULL_SWEEP),
+        [a_settled_answer()],
+        ctx,
+        clock,
+        reviews=[a_verdict()],
+    )
+    assert [s.kind for s in out.steps].count("critic") == 1
+    assert out.state.verdicts[0].verdict == "accept"
+    assert out.state.cycle == 0
+
+
+def test_an_answer_that_skipped_a_lookalike_is_sent_back_by_the_loop(
+    ctx: ToolContext, clock: FrozenClock
+) -> None:
+    """One measurement cannot clear seven look-alikes, whatever the model says."""
+    out = run(
+        [a_plan(["compute_temp_corrected_pr"])] * 2,
+        [a_call("compute_temp_corrected_pr"), a_stop()] * 2,
+        [a_settled_answer()] * 2,
+        ctx,
+        clock,
+        reviews=[a_verdict(), a_verdict()],
+        max_cycles=2,
+    )
+    assert out.state.verdicts[0].verdict == "send_back"
+    assert out.state.cycle == 2
+    assert "2-cycle review cap" in out.stopped_because
+
+
+def test_review_is_charged_to_the_investigation(
+    ctx: ToolContext, clock: FrozenClock
+) -> None:
+    out = run(
+        [a_plan(ALL_TOOLS)],
+        list(FULL_SWEEP),
+        [a_settled_answer()],
+        ctx,
+        clock,
+        reviews=[a_verdict()],
+    )
+    # planner, one router call per tool plus the stop, synthesiser, critic
+    assert out.llm_calls == 1 + len(FULL_SWEEP) + 1 + 1
+
+
+def test_the_review_reaches_the_tape_in_plain_words(
+    ctx: ToolContext, clock: FrozenClock
+) -> None:
+    """`not_enough_evidence: H1, H2` is internal vocabulary."""
+    out = run(
+        [
+            a_plan(
+                ["check_ac_ceiling"],
+                [("H1", "clipping"), ("H2", "curtailment")],
+            )
+        ],
+        [a_call("check_ac_ceiling"), a_stop()],
+        [an_unsettled_answer()],
+        ctx,
+        clock,
+        reviews=[
+            a_verdict(
+                verdict="not_enough_evidence",
+                hypotheses_still_standing=["H1", "H2"],
+            )
+        ],
+    )
+    step = next(s for s in out.steps if s.kind == "critic")
+    assert "not_enough_evidence" not in (step.result or "")
+    assert "H1" not in (step.result or "")
+    assert "clipping" in (step.result or "")
+
+
+def test_the_cycle_cap_holds_with_the_real_critic(
+    ctx: ToolContext, clock: FrozenClock
+) -> None:
+    sent_back = a_verdict(verdict="send_back", revision_request="try check_ac_ceiling")
+    client = ScriptedClient(
+        replies={
+            "planner": [a_plan(["compute_temp_corrected_pr"])] * 6,
+            "router": [a_call("compute_temp_corrected_pr"), a_stop()] * 6,
+            "synthesizer": [a_settled_answer()] * 6,
+            "critic": [sent_back] * 6,
+        }
+    )
+    out = investigate(
+        "q", ctx, client, clock, investigation_id="INV-CAP6", max_cycles=4
+    )
+    assert out.state.cycle == 4
+    assert len(out.state.verdicts) == 4
+    assert "4-cycle review cap" in out.stopped_because
+
+
+def test_the_configured_cap_is_four() -> None:
+    """§3.5 hard cap, and the loop's default must match the config."""
+    from src.config import load_models_config
+
+    assert load_models_config().limits.max_planner_critic_cycles == 4
+
+
+# ===========================================================================
+# `accept` must be reachable
+# ===========================================================================
+# The first scored run produced ten reviews and zero accepts. Every case ran to
+# the cycle cap, and on one a correct answer was rejected into a wrong "not
+# enough evidence".
+#
+# The cause was that the verdict was gated on the *intersection* of look-alikes
+# measured and look-alikes the critic named — so a reviewer that named the
+# three relevant to a string fault, rather than reciting all seven, forced
+# send_back however good the answer was.
+#
+# `test_accept_survives_a_clean_answer` above did not catch it because
+# `a_verdict()` defaults `lookalikes_considered` to the whole checklist. The
+# fixture recited all seven every time, which is precisely what a real critic
+# does not do.
+def test_accept_survives_a_critic_that_named_only_the_relevant_lookalikes() -> None:
+    """The verdict is gated on what was measured, not on what was recited."""
+    client = ScriptedClient(
+        replies={
+            "critic": [
+                a_verdict(lookalikes_considered=["weather", "sensor_drift", "clipping"])
+            ]
+        }
+    )
+    verdict = review(
+        client,
+        a_state([*ALL_TOOLS, "detect_stuck_channels"]),
+        "brief",
+        [a_result("compute_temp_corrected_pr", pr=0.8)],
+        [],
+        a_synthesis(),
+    ).verdict
+    assert verdict.verdict == "accept"
+
+
+def test_accept_is_still_refused_when_a_lookalike_was_never_measured() -> None:
+    """Loosening the recitation requirement must not loosen the measuring one.
+
+    This is the guarantee the checklist is actually for: a tool that
+    discriminates each look-alike must have run.
+    """
+    client = ScriptedClient(replies={"critic": [a_verdict()]})
+    verdict = review(
+        client,
+        a_state(["compute_temp_corrected_pr"]),
+        "brief",
+        [a_result("compute_temp_corrected_pr", pr=0.8)],
+        [],
+        a_synthesis(),
+    ).verdict
+    assert verdict.verdict == "send_back"
+    assert verdict.unchecked_lookalikes
+
+
+def test_the_checklist_credits_nothing_the_model_merely_claimed() -> None:
+    """The guarantee is unchanged: a tool that discriminates it must have run.
+
+    What changed is that the critic's own list is ignored rather than
+    intersected — an unverifiable claim can only delete true positives, never
+    catch a false one.
+    """
+    from src.agent.nodes.critic import lookalikes_measured
+
+    one_tool = lookalikes_measured(["compute_temp_corrected_pr"])
+    assert set(one_tool) < set(LOOKALIKE_CHECKLIST), (
+        "one tool must not satisfy the whole checklist"
+    )
+
+    client = ScriptedClient(
+        replies={"critic": [a_verdict(lookalikes_considered=list(LOOKALIKE_CHECKLIST))]}
+    )
+    verdict = review(
+        client,
+        a_state(["compute_temp_corrected_pr"]),
+        "brief",
+        [a_result("compute_temp_corrected_pr", pr=0.8)],
+        [],
+        a_synthesis(),
+    ).verdict
+    assert set(verdict.lookalikes_checked) == set(one_tool), (
+        "the verdict credited a look-alike the run never measured"
+    )
+
+
+# ===========================================================================
+# A review is not a veto
+# ===========================================================================
+# Read from a real trace. Every send_back on G-001 carried at least one prose
+# observation, and any entry in `unsupported_claims` blocked `accept` — so the
+# critic disqualified every answer it reviewed by reviewing it thoroughly.
+#
+# The observations were good. One of them independently identified a defect in
+# the fault injector. That is precisely why they must inform the next cycle
+# rather than end the investigation.
+_A_REAL_OBSERVATION = (
+    '"there is no matching rise in performance ratio which would be the '
+    'signature of a bad sensor" — no tool measured or reported a correlation '
+    "between clear-sky ratio and PR trend; this is an inference presented as "
+    "evidence."
+)
+
+
+def test_a_reviewers_prose_objection_does_not_veto_an_accept() -> None:
+    client = ScriptedClient(
+        replies={"critic": [a_verdict(unsupported_claims=[_A_REAL_OBSERVATION])]}
+    )
+    verdict = review(
+        client,
+        a_state([*ALL_TOOLS, "detect_stuck_channels"]),
+        "brief",
+        [a_result("compute_temp_corrected_pr", pr=0.8)],
+        [],
+        a_synthesis(),
+    ).verdict
+
+    assert verdict.verdict == "accept"
+    assert _A_REAL_OBSERVATION in verdict.observations, (
+        "the reviewer's point must still be recorded and shown"
+    )
+    assert verdict.unsupported_claims == [], (
+        "prose judgement must not be filed as a grounding failure"
+    )
+
+
+def test_a_fabricated_figure_still_vetoes() -> None:
+    """The guarantee that matters is unchanged: a number in the prose that no
+    tool measured cannot reach the interface."""
+    client = ScriptedClient(replies={"critic": [a_verdict()]})
+    verdict = review(
+        client,
+        a_state([*ALL_TOOLS, "detect_stuck_channels"]),
+        "brief",
+        [a_result("compute_temp_corrected_pr", pr=0.8)],
+        [],
+        a_synthesis(answer="The performance ratio is 0.42 and losses are 137 kWh."),
+    ).verdict
+
+    assert verdict.verdict == "send_back"
+    assert verdict.unsupported_claims, "the arithmetic check must still bite"
+
+
+def test_the_reviewers_words_become_the_revision_request() -> None:
+    """When it does send back, the reviewer's own point is the instruction —
+    falling back to boilerplate throws away the one thing it produced."""
+    client = ScriptedClient(
+        replies={
+            "critic": [
+                a_verdict(
+                    verdict="send_back",
+                    revision_request="",
+                    unsupported_claims=[_A_REAL_OBSERVATION],
+                )
+            ]
+        }
+    )
+    verdict = review(
+        client,
+        a_state([*ALL_TOOLS, "detect_stuck_channels"]),
+        "brief",
+        [a_result("compute_temp_corrected_pr", pr=0.8)],
+        [],
+        a_synthesis(),
+    ).verdict
+
+    assert verdict.verdict == "send_back"
+    assert verdict.revision_request
+    assert "signature of a bad sensor" in verdict.revision_request
+
+
+def test_the_two_kinds_of_objection_stay_separate() -> None:
+    """Merging them is what caused this; a test that lets them merge again
+    would let it recur."""
+    client = ScriptedClient(
+        replies={"critic": [a_verdict(unsupported_claims=[_A_REAL_OBSERVATION])]}
+    )
+    verdict = review(
+        client,
+        a_state([*ALL_TOOLS, "detect_stuck_channels"]),
+        "brief",
+        [a_result("compute_temp_corrected_pr", pr=0.8)],
+        [],
+        a_synthesis(answer="Losses came to 137 kWh."),
+    ).verdict
+
+    assert verdict.unsupported_claims, "the fabricated figure belongs here"
+    assert verdict.observations == [_A_REAL_OBSERVATION], "the prose belongs here"
+    assert not set(verdict.observations) & set(verdict.unsupported_claims)
+
+
+# ===========================================================================
+# An abstention must not name a measurement the agent could have taken
+# ===========================================================================
+def test_unrun_tools_named_in_separates_the_two_kinds_of_abstention() -> None:
+    """`not_enough_evidence` is honest only when the evidence is out of reach.
+
+    G-039's resolving measurement is the grid operator's dispatch log — outside
+    the telemetry and outside the tool set, so declining is right. G-017's was
+    "run string_onset_scan", a tool in its own registry that it had not got to
+    before the per-cycle cap. Until this function existed nothing told them
+    apart, and the second scored as a missed fault.
+    """
+    ran = ["compute_temp_corrected_pr"]
+    assert unrun_tools_named_in(
+        "Run string_onset_scan to see whether the shortfall tracks the sun", ran
+    ) == ["string_onset_scan"]
+    assert (
+        unrun_tools_named_in(
+            "Pull the grid operator's dispatch log or the inverter's configuration",
+            ran,
+        )
+        == []
+    )
+    # A tool already run is not an outstanding measurement.
+    assert unrun_tools_named_in("re-read compute_temp_corrected_pr", ran) == []
+    assert unrun_tools_named_in(None, ran) == []
+
+
+def test_an_abstention_naming_an_unrun_tool_is_sent_back() -> None:
+    client = ScriptedClient(replies={"critic": [a_verdict(verdict="accept")]})
+    verdict = review(
+        client,
+        a_state([*ALL_TOOLS, "detect_stuck_channels"]),
+        "brief",
+        [a_result("compute_temp_corrected_pr", pr=0.8)],
+        [],
+        a_synthesis(
+            settled=False,
+            cause=None,
+            confidence=None,
+            candidate_causes=[
+                CandidateCause(cause="shading", consequence_if_true="trim a tree"),
+                CandidateCause(cause="string_outage", consequence_if_true="a visit"),
+            ],
+            resolving_measurement="Run string_onset_scan over the morning hours.",
+        ),
+    ).verdict
+
+    assert verdict.verdict == "send_back"
+    assert verdict.revision_request is not None
+    assert "string_onset_scan" in verdict.revision_request
+    assert "never taken" in verdict.revision_request
+
+
+def test_an_abstention_on_evidence_out_of_reach_stands() -> None:
+    """The outcome the checked-for case must not damage. G-039 is this one."""
+    client = ScriptedClient(
+        replies={
+            "critic": [
+                a_verdict(
+                    verdict="not_enough_evidence",
+                    hypotheses_still_standing=["clipping", "curtailment"],
+                )
+            ]
+        }
+    )
+    verdict = review(
+        client,
+        a_state([*ALL_TOOLS, "detect_stuck_channels"]),
+        "brief",
+        [a_result("check_ac_ceiling", plateau_kw=185.0)],
+        [],
+        a_synthesis(
+            settled=False,
+            cause=None,
+            confidence=None,
+            candidate_causes=[
+                CandidateCause(cause="clipping", consequence_if_true="nothing"),
+                CandidateCause(cause="curtailment", consequence_if_true="nothing"),
+            ],
+            resolving_measurement=(
+                "Pull the grid operator's dispatch log for this window."
+            ),
+        ),
+    ).verdict
+    assert verdict.verdict == "not_enough_evidence"
+
+
+def test_a_settled_answer_is_not_checked_for_outstanding_measurements() -> None:
+    """A committed answer's `resolving_measurement` is stripped, not honoured."""
+    client = ScriptedClient(replies={"critic": [a_verdict()]})
+    verdict = review(
+        client,
+        a_state([*ALL_TOOLS, "detect_stuck_channels"]),
+        "brief",
+        [a_result("compute_temp_corrected_pr", pr=0.8)],
+        [],
+        a_synthesis(resolving_measurement="Run string_onset_scan."),
+    ).verdict
+    assert verdict.verdict == "accept"
+
+
+# ===========================================================================
+# The critic can see its own previous review
+# ===========================================================================
+def test_the_critic_is_shown_what_it_asked_for_last_time() -> None:
+    """The root cause of the send_back loop, and it was an absence.
+
+    The prompt held the brief, the hypotheses, the evidence, the draft and the
+    checklist — and nothing about the critic's own previous review. The planner
+    and synthesiser both receive `revision_request`, so information flowed one
+    way and nothing came back. Every review was a fresh reviewer with unlimited
+    standards and no memory, which is why it re-raised answered objections and
+    could never notice the answer had stopped changing.
+    """
+    client = ScriptedClient(replies={"critic": [a_verdict()]})
+    previous = CriticVerdict(
+        hypotheses_considered=["H1"],
+        verdict="send_back",
+        revision_request="reconcile the sharp onset with characterize_onset",
+    )
+    review(
+        client,
+        a_state([*ALL_TOOLS, "detect_stuck_channels"]),
+        "brief",
+        [a_result("compute_temp_corrected_pr", pr=0.8)],
+        [],
+        a_synthesis(),
+        previous=previous,
+        previous_answer="shading",
+        measurements_since=3,
+    )
+
+    _, _, user = client.calls[-1]
+    assert "YOUR OWN PREVIOUS REVIEW" in user
+    assert "reconcile the sharp onset" in user
+    assert "3 further measurement" in user
+    assert "shading" in user
+    assert "converged" in user
+
+
+def test_a_first_review_is_not_told_about_a_previous_one() -> None:
+    client = ScriptedClient(replies={"critic": [a_verdict()]})
+    review(
+        client,
+        a_state([*ALL_TOOLS, "detect_stuck_channels"]),
+        "brief",
+        [a_result("compute_temp_corrected_pr", pr=0.8)],
+        [],
+        a_synthesis(),
+    )
+    _, _, user = client.calls[-1]
+    assert "YOUR OWN PREVIOUS REVIEW" not in user
+
+
+def test_the_critic_must_say_whether_its_request_was_addressed() -> None:
+    """A structured field, so it cannot be answered by not mentioning it."""
+    considered = CRITIC_SCHEMA["properties"]["previous_request_addressed"]
+    assert considered["enum"] == ["yes", "no", "no_previous_request"]
+    assert "previous_request_addressed" in CRITIC_SCHEMA["required"]
+
+    client = ScriptedClient(
+        replies={"critic": [a_verdict(previous_request_addressed="yes")]}
+    )
+    verdict = review(
+        client,
+        a_state([*ALL_TOOLS, "detect_stuck_channels"]),
+        "brief",
+        [a_result("compute_temp_corrected_pr", pr=0.8)],
+        [],
+        a_synthesis(),
+    ).verdict
+    assert verdict.previous_request_addressed == "yes"
+
+
+def test_the_deterministic_checks_are_shared_with_the_convergence_stop() -> None:
+    """One implementation, so the two paths cannot enforce different rules."""
+    state = a_state(["check_ac_ceiling"])
+    synthesis = a_synthesis(answer="a made-up 0.4213", summary="a made-up 0.4213")
+    objections = inspect_draft(
+        state, [a_result("check_ac_ceiling", peak=1.0)], synthesis
+    )
+
+    assert not objections.clean
+    assert any("0.4213" in c for c in objections.unsupported)
+    assert "telemetry_gap" in objections.unmeasured
+    assert objections.as_request()
+
+    clean = inspect_draft(
+        a_state([*ALL_TOOLS, "detect_stuck_channels"]),
+        [a_result("compute_temp_corrected_pr", pr=0.8)],
+        a_synthesis(),
+    )
+    assert clean.clean and clean.as_request() is None

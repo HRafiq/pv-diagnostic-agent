@@ -1,0 +1,77 @@
+# The suite, run against what the repository actually contains.
+#
+# This exists because of three bugs that a local run could not see, all found
+# by a fresh clone on a second machine:
+#
+#   1. `.gitignore` matched `src/findings/` and two modules were never
+#      committed. Every local check was green; the clone failed to import.
+#   2. Four tests loaded the ingested PVDAQ dataset from `data/raw/`. It is
+#      gitignored, so they passed wherever the download had been run and failed
+#      everywhere else.
+#   3. `pyarrow` was never declared. It happened to be present in the
+#      development container, so the parquet layer — which is the entire data
+#      path — worked there and raised ImportError on a clean install.
+#
+# All three are the same failure: a green local suite says the code on *that
+# disk* works, not that the repository does. The job below starts from a
+# checkout with no data directory, no API key, and no packages except what
+# `uv.lock` names.
+
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The range `requires-python` claims. Testing only one end of it means
+        # the other is an untested assertion.
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Check the lockfile matches pyproject.toml
+        # A dependency added to pyproject without re-running `uv lock` would
+        # otherwise install fine here and be missing for everyone syncing from
+        # the lockfile — bug 3 above, in a new costume.
+        run: uv lock --check
+
+      - name: Install
+        run: uv sync --extra dev --frozen --python ${{ matrix.python-version }}
+
+      - name: Confirm the checkout has no ingested data
+        # If a future change commits the dataset, the tests stop proving they
+        # are independent of it and this job should say so rather than pass.
+        run: |
+          if compgen -G "data/raw/*.parquet" > /dev/null; then
+            echo "data/raw/ contains a dataset; the suite is no longer proving"
+            echo "it runs on a clean checkout. See CLAUDE.md, repository hygiene."
+            exit 1
+          fi
+          echo "clean: no ingested data present"
+
+      - name: Lint
+        run: |
+          uv run --frozen ruff check .
+          uv run --frozen ruff format --check .
+
+      - name: Types
+        run: uv run --frozen mypy src eval simulator dashboard
+
+      - name: Tests
+        # No ANTHROPIC_API_KEY is set. Everything except the agent's LLM path
+        # must run without one, and the tests covering that path use the
+        # scripted client rather than the network.
+        run: uv run --frozen pytest
