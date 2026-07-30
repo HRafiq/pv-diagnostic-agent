@@ -1378,3 +1378,169 @@ def test_every_node_that_reads_an_answer_may_write_as_long_as_it() -> None:
             f"profile {name}: the critic reads the synthesiser's whole output "
             "and must be able to write at least as much"
         )
+
+
+# ===========================================================================
+# Convergence: an answer that stops moving is accepted without asking again
+# ===========================================================================
+# Six of the seven look-alikes, so one more measurement in the second cycle
+# completes the checklist. Convergence applies the same deterministic checks a
+# review does, so a run that has not weighed the look-alikes cannot take it —
+# an earlier version of these tests skipped that and failed, correctly.
+_COVERING_PLAN = [
+    "check_ac_ceiling",
+    "weather_context",
+    "compute_temp_corrected_pr",
+    "check_clearsky_consistency",
+]
+
+
+def test_the_same_answer_after_more_measurements_converges(
+    ctx: ToolContext, clock: FrozenClock
+) -> None:
+    """The fix for the failure that dominated every run of this project.
+
+    G-001, G-005, G-006 and G-017 each reached the correct cause and were
+    talked out of it. G-017's last run committed to `shading` in cycle 1 and
+    again in cycle 2 after three more measurements, and was sent back both
+    times — then cycle 3 abandoned it.
+
+    More evidence not moving the answer is the strongest signal available that
+    another cycle will not move it either. Deciding that needs arithmetic, not
+    a reviewer.
+    """
+    calls: list[str] = []
+
+    def always_send_back(
+        state: AgentState, results: Any, synthesis: Any
+    ) -> CriticVerdict:
+        calls.append("review")
+        return _verdict(
+            "send_back",
+            checked=_ALL_LOOKALIKES,
+            revision_request="measure the onset more precisely",
+        )
+
+    client = ScriptedClient(
+        replies={
+            "planner": [a_plan(_COVERING_PLAN), a_plan(["profile_data_quality"])],
+            "router": [
+                *(a_call(name) for name in _COVERING_PLAN),
+                a_stop(),
+                a_call("profile_data_quality"),
+                a_stop(),
+            ],
+            # The same cause twice, which is what convergence means.
+            "synthesizer": [a_settled_answer(), a_settled_answer()],
+        }
+    )
+    out = investigate(
+        "q", ctx, client, clock, investigation_id="INV-CONV", critic=always_send_back
+    )
+
+    # Reviewed once, converged on the second cycle without a second review.
+    assert calls == ["review"]
+    assert out.synthesis is not None and out.synthesis.settled
+    assert out.synthesis.cause == "string_outage"
+    assert out.finding is not None and out.finding.settled
+    assert "converged" in out.stopped_because
+    assert out.state.verdicts[-1].verdict == "accept"
+
+
+def test_a_changed_answer_does_not_converge(
+    ctx: ToolContext, clock: FrozenClock
+) -> None:
+    """Convergence is "the answer stopped moving", not "we went round twice"."""
+    calls: list[str] = []
+
+    def always_send_back(
+        state: AgentState, results: Any, synthesis: Any
+    ) -> CriticVerdict:
+        calls.append("review")
+        return _verdict(
+            "send_back", checked=_ALL_LOOKALIKES, revision_request="look again"
+        )
+
+    client = ScriptedClient(
+        replies={
+            "planner": [
+                a_plan(["check_ac_ceiling"]),
+                a_plan(["compute_temp_corrected_pr"]),
+                a_plan(["weather_context"]),
+            ],
+            "router": [
+                a_call("check_ac_ceiling"),
+                a_stop(),
+                a_call("compute_temp_corrected_pr"),
+                a_stop(),
+                a_call("weather_context"),
+                a_stop(),
+            ],
+            "synthesizer": [
+                a_settled_answer(cause="string_outage"),
+                a_settled_answer(cause="shading"),
+                a_settled_answer(cause="soiling"),
+            ],
+        }
+    )
+    out = investigate(
+        "q",
+        ctx,
+        client,
+        clock,
+        investigation_id="INV-MOVING",
+        critic=always_send_back,
+        max_cycles=3,
+    )
+    assert len(calls) >= 2, "a moving answer must keep being reviewed"
+    assert "converged" not in out.stopped_because
+
+
+def test_convergence_still_refuses_a_fabricated_figure(
+    ctx: ToolContext, clock: FrozenClock
+) -> None:
+    """Skipping the review must not skip the checks that need no review.
+
+    `inspect_draft` is the same deterministic half the critic runs. An answer
+    accepted by convergence has passed every one of them; what it skips is the
+    opinion.
+    """
+    seen: list[str] = []
+
+    def always_send_back(
+        state: AgentState, results: Any, synthesis: Any
+    ) -> CriticVerdict:
+        seen.append("review")
+        return _verdict(
+            "send_back", checked=_ALL_LOOKALIKES, revision_request="check the figure"
+        )
+
+    invented = a_settled_answer(
+        answer="One string is at 0.4213 of its neighbours.",
+        summary="One string is at 0.4213 of its neighbours.",
+    )
+    client = ScriptedClient(
+        replies={
+            "planner": [a_plan(_COVERING_PLAN), a_plan(["profile_data_quality"])],
+            "router": [
+                *(a_call(name) for name in _COVERING_PLAN),
+                a_stop(),
+                a_call("profile_data_quality"),
+                a_stop(),
+            ],
+            "synthesizer": [invented, invented],
+        }
+    )
+    out = investigate(
+        "q",
+        ctx,
+        client,
+        clock,
+        investigation_id="INV-DIRTY",
+        critic=always_send_back,
+        max_cycles=2,
+    )
+    # Same answer twice, but it carries a figure no tool measured, so the
+    # convergence path must not take it.
+    assert len(seen) >= 2
+    assert "converged" not in out.stopped_because

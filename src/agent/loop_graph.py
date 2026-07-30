@@ -18,9 +18,20 @@ What LangGraph actually contributes here, honestly:
 * **Conditional edges name the branches.** `_after_route` returning `"execute"`,
   `"look_up"` or `"synthesise"` is the same `if` the plain loop has, but as a
   labelled transition an operator can see in a diagram.
-* **Checkpointing comes free**, which is the one capability the plain loop does
-  not have and the one an 86-case evaluation actually wants: a run that dies at
-  case 60 currently starts again.
+* **Checkpointing is available**, which the plain loop cannot offer at all.
+  This is worth stating carefully, because the entry above used to promise that
+  it saved "a run that dies at case 60", and it does not. The saver wired up
+  here is in-memory: it records every node boundary within one investigation and
+  dies with the process. The failures that actually cost this project — an API
+  overload at case 6, an exhausted credit balance mid-answer — take the
+  interpreter with them. Surviving *those* is `eval/runner.py`'s job, which
+  persists each case as it completes and skips them on `--resume`.
+
+  So the honest ledger is: the framework makes within-run resume *possible*
+  where the plain loop makes it impossible, and a durable saver
+  (`langgraph-checkpoint-sqlite`) would make it real. Nothing more was ever
+  delivered by the framework itself, and the claim sat in this docstring
+  unexamined for as long as the port sat unused.
 
 What it costs: the cycle bound has to be restated as a recursion limit, the
 inner measurement loop becomes a self-edge that is harder to read than a `for`,
@@ -43,6 +54,7 @@ from src.agent.loop_plain import (
     _accrue,
     _apply_exclusions,
     _build_finding,
+    _converged_verdict,
     _verdict_in_plain_words,
 )
 from src.agent.nodes import (
@@ -53,6 +65,7 @@ from src.agent.nodes import (
     synthesize,
     withdraw_commitment,
 )
+from src.agent.nodes.critic import inspect_draft
 from src.agent.nodes.critic import review as run_review
 from src.agent.nodes.prompts import plant_brief
 from src.agent.state import AgentState
@@ -105,6 +118,9 @@ class _Run:
         self.unproductive_lookups = 0
         self.revision_request: str | None = None
         self.measurements_this_cycle = 0
+        self.previous_verdict: Any = None
+        self.previous_cause: str | None = None
+        self.measurements_at_last_review = 0
         self.router_turns = 0
         self.stop_decision: RouterDecision | None = None
 
@@ -121,8 +137,24 @@ class _Run:
                 self.on_step(step)
 
 
-def build_graph(run: _Run) -> Any:
-    """Compile the state machine. Returns a LangGraph `CompiledStateGraph`."""
+def build_graph(run: _Run, checkpointer: Any | None = None) -> Any:
+    """Compile the state machine. Returns a LangGraph `CompiledStateGraph`.
+
+    Args:
+        checkpointer: A LangGraph saver. `investigate_with_graph` supplies an
+            `InMemorySaver` so the run is genuinely checkpointed and every node
+            boundary is inspectable — this file claimed checkpointing as the one
+            thing the framework bought, and nothing was wired up.
+
+            Be precise about what it buys, because the obvious reading is wrong:
+            an in-memory saver does **not** survive the process. The failures
+            that actually cost us — an overload at case 6, an exhausted credit
+            balance mid-answer — kill the interpreter, and nothing in memory
+            outlives that. Surviving those is the *runner's* job, and
+            `eval/runner.py` does it by persisting each case as it finishes.
+            Durable within-investigation resume needs `langgraph-checkpoint-
+            sqlite`, which is not a dependency here.
+    """
     from langgraph.graph import END, START, StateGraph
 
     graph = StateGraph(AgentState)
@@ -358,6 +390,48 @@ def build_graph(run: _Run) -> Any:
 
     def review_node(state: AgentState) -> AgentState:
         assert run.critic is not False
+        synthesis = run.out.synthesis
+        assert synthesis is not None
+
+        # Same convergence stop as the plain loop, which is the specification.
+        mechanical = inspect_draft(state, run.out.results, synthesis)
+        if (
+            run.previous_verdict is not None
+            and run.previous_cause is not None
+            and synthesis.settled
+            and synthesis.cause == run.previous_cause
+            and len(run.out.results) > run.measurements_at_last_review
+            and mechanical.clean
+        ):
+            converged = _converged_verdict(state, synthesis)
+            state.verdicts.append(converged)
+            run.emit(
+                TraceStep(
+                    kind="critic",
+                    node="critic",
+                    args={
+                        "cycle": state.cycle,
+                        "verdict": converged.verdict,
+                        "still_standing": [],
+                        "unsupported_claims": [],
+                        "unchecked_lookalikes": list(converged.unchecked_lookalikes),
+                        "revision_request": None,
+                        "converged": True,
+                    },
+                    result=(
+                        f"the same answer ({synthesis.cause}) survived "
+                        f"{len(run.out.results) - run.measurements_at_last_review} "
+                        "further measurement(s), so the investigation has converged"
+                    ),
+                    was_planned=True,
+                )
+            )
+            run.out.stopped_because = (
+                "the answer did not change after the review's measurements, "
+                "so the investigation converged"
+            )
+            return state
+
         if run.critic is None:
             reviewed = run_review(
                 run.client,
@@ -365,12 +439,20 @@ def build_graph(run: _Run) -> Any:
                 run.brief,
                 run.out.results,
                 run.out.errors,
-                run.out.synthesis,  # type: ignore[arg-type]
+                synthesis,
+                previous=run.previous_verdict,
+                previous_answer=run.previous_cause,
+                measurements_since=(
+                    len(run.out.results) - run.measurements_at_last_review
+                ),
             )
             _accrue(run.out, reviewed.response)
             verdict = reviewed.verdict
         else:
-            verdict = run.critic(state, run.out.results, run.out.synthesis)  # type: ignore[arg-type]
+            verdict = run.critic(state, run.out.results, synthesis)
+        run.previous_verdict = verdict
+        run.previous_cause = synthesis.cause
+        run.measurements_at_last_review = len(run.out.results)
         state.verdicts.append(verdict)
         run.emit(
             TraceStep(
@@ -487,7 +569,7 @@ def build_graph(run: _Run) -> Any:
         "synthesise", after_synthesise, {"review": "review", "done": END}
     )
     graph.add_conditional_edges("review", after_review, {"replan": "plan", "done": END})
-    return graph.compile()
+    return graph.compile(checkpointer=checkpointer)
 
 
 def investigate_with_graph(
@@ -563,9 +645,16 @@ def investigate_with_graph(
         # mutated. Reading the local `state` back would report an untouched
         # AgentState — no tools called, no cycles used — and the equivalence
         # test would be comparing a real run against an empty one.
-        final = build_graph(run).invoke(
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        final = build_graph(run, checkpointer=InMemorySaver()).invoke(
             state,
-            {"recursion_limit": _recursion_budget(max_cycles, max_tools_per_cycle)},
+            {
+                "recursion_limit": _recursion_budget(max_cycles, max_tools_per_cycle),
+                # A checkpointer requires a thread to write against. One
+                # investigation is one thread.
+                "configurable": {"thread_id": investigation_id},
+            },
         )
         state = (
             final if isinstance(final, AgentState) else AgentState.model_validate(final)

@@ -2211,3 +2211,120 @@ stay in the denominator on purpose; on one case they are noise, not a result.
 Whether 0067 and 0068 recover G-017 remains unmeasured. Six measurements is one
 past the old cap of eight would have allowed for discrimination, which is
 suggestive of nothing yet.
+
+---
+
+## 0070 — Convergence is arithmetic, not an opinion (2026-07-29)
+
+**The failure this closes, stated plainly.** Four cases reached the correct
+cause and were talked out of it: G-001, G-005, G-006, G-017. G-017's last run
+committed to `shading` in cycle 1, again in cycle 2 after three more
+measurements, and was sent back both times; cycle 3 abandoned it for "not
+enough evidence". Two thirds of a ten-minute run were spent making the answer
+worse.
+
+**The rule.** If the previous cycle committed to a cause, this cycle took more
+measurements in response to the review, and the answer is *still* that cause,
+the investigation has converged. More evidence did not move it, which is the
+strongest signal available that another cycle will not either. No model is asked.
+
+**What it does not skip.** `inspect_draft` — factored out of `review` for this
+purpose — is the deterministic half of a review: no fabricated numerics, every
+look-alike weighed, no abstention naming an unrun tool. An answer accepted by
+convergence has passed every check that does not require judgement. What it
+skips is the judgement, and the judgement is what was destroying correct
+answers. A test asserts that a draft carrying an invented figure is *not*
+accepted by this path however many times it repeats.
+
+Writing the tests found the same edge honestly: the first version did not weigh
+the look-alikes and therefore did not converge. The test was wrong and the code
+was right, which is the correct way round for once.
+
+It also bounds latency. A converged answer stops at cycle 2 rather than running
+to the cap — roughly two thirds of the wall clock on the runs measured so far.
+
+---
+
+## 0071 — The critic could not see its own previous review (2026-07-29)
+
+**The core issue, after five rounds of fixing symptoms.** The critic's prompt
+held the brief, the candidate causes, every measurement, the draft and the
+look-alike checklist. It held **nothing about its own previous review**.
+Meanwhile `plan()` and `synthesize()` both receive `revision_request`. So
+information flowed one way — critic to planner and synthesiser — and nothing
+came back.
+
+Every review was therefore a fresh reviewer meeting the case for the first
+time, with unlimited standards and no memory. The consequences are the entire
+observed history:
+
+* It could not say "you addressed my concern", because it did not know it had
+  one.
+* It re-raised the same objection in new words. G-017: "reconcile the sharp
+  onset detected by characterize_onset", then "split the string-1 evidence
+  around the 2017-03-16" — the same point, after the first had been answered
+  with three more measurements.
+* It could not notice the answer had not changed, which is the strongest
+  evidence of convergence available to it.
+* A competent reviewer always finds something and nothing priced another cycle,
+  so `send_back` was the equilibrium rather than an accident.
+
+The earlier fixes — grounding quotation (0059), the ledger collision (0062),
+the checklist vocabulary (0066) — were all real bugs, and clearing them is why
+this became visible: the send_backs in the final G-017 run were pure critic
+judgement with no deterministic veto masking them. But they were repeatedly
+described as "the reason it never accepts", and they were not.
+
+**The fix.** `review()` now receives its previous verdict, the cause the last
+cycle committed to, and how many measurements were taken in response, and the
+prompt says what to do with them: *"If what you asked for was done and the
+answer is unchanged, that is evidence the investigation has converged and
+should be accepted — not a reason to find something new."* A structured
+`previous_request_addressed` field makes it answer rather than pass over.
+
+**What deliberately did not change.** The critic still tightens and never
+loosens; `previous_request_addressed: "yes"` does not override a `send_back`
+into an `accept`. Giving a model the power to talk itself into accepting is the
+opposite of the guarantee this node exists for. The *deterministic* convergence
+stop in DECISION 0070 is where an accept can be granted without being asked
+for, and it is arithmetic.
+
+---
+
+## 0072 — The graph becomes the production path, and the checkpointing claim
+gets corrected (2026-07-29)
+
+`loop_graph.py` was written, equivalence-tested and then called by nothing:
+both `eval/runner.py` and `watcher.py` imported `loop_plain.investigate`. Every
+run this project has ever done used the plain loop. A second implementation
+nobody exercises is a liability, not a safety net, so the runner and the
+watcher now import the graph. The plain loop remains the specification and the
+equivalence test remains the gate.
+
+**And the claim that justified the port was false.** This file's own docstring
+said *"Checkpointing comes free... a run that dies at case 60 currently starts
+again."* There was no checkpointer — no saver, no thread id, only a recursion
+limit. It sat unexamined for as long as the port sat unused.
+
+One is wired now (`InMemorySaver`, thread id per investigation), and the
+docstring says what it actually buys. Be precise: an in-memory saver records
+every node boundary inside one investigation and **dies with the process**. The
+failures that actually cost this project cases — an API overload at case 6, an
+exhausted credit balance mid-answer — take the interpreter with them. Durable
+within-run resume needs `langgraph-checkpoint-sqlite`, which is not a
+dependency here.
+
+**So the resumability that matters is the runner's, and it is not LangGraph's.**
+What is expensive to lose is the twenty cases already paid for, and only a file
+survives that. `--resume FILE` writes one JSON object per case as it finishes
+and skips cases already recorded. Append-only and flushed per case, so a
+process killed mid-write loses at most the case in flight — and a half-written
+final line is skipped rather than refusing the whole resume, because refusing
+would discard exactly what the journal exists to save. The `failed_with` marker
+survives the round trip, so a resumed run still does not count a crash as a
+chosen abstention.
+
+The honest ledger on the framework, for `docs/LANGGRAPH_TRADEOFF.md`: it makes
+within-run resume *possible* where the plain loop makes it impossible. It did
+not deliver the thing the docstring promised, and the thing that was actually
+needed took thirty lines of `json.dumps` in the runner.

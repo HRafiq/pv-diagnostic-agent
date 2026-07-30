@@ -30,7 +30,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from src.agent.llm import build_client
-from src.agent.loop_plain import investigate
+from src.agent.loop_graph import investigate_with_graph as investigate
 from src.baseline.rules import RulesEngine
 from src.clock import Clock
 from src.config import (

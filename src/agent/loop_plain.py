@@ -37,6 +37,7 @@ from src.agent.nodes import (
     synthesize,
     withdraw_commitment,
 )
+from src.agent.nodes.critic import inspect_draft
 from src.agent.nodes.critic import review as run_review
 from src.agent.nodes.prompts import plant_brief
 from src.agent.state import AgentState, CriticVerdict
@@ -98,6 +99,24 @@ def _accrue(target: InvestigationResult, response: LLMResponse | None) -> None:
 # How many times the router may ask for knowledge it already has before the
 # cycle is ended. Two warnings, then stop — see the look_up branch below.
 _MAX_UNPRODUCTIVE_LOOKUPS = 3
+
+
+def _converged_verdict(state: AgentState, synthesis: Synthesis) -> CriticVerdict:
+    """The verdict for an answer that stopped moving.
+
+    Constructed rather than requested. Every check that does not need judgement
+    has already passed (`inspect_draft`), and the judgement is the part that was
+    destroying correct answers, so there is nothing left to ask.
+    """
+    from src.agent.nodes.critic import lookalikes_measured
+
+    return CriticVerdict(
+        hypotheses_considered=[h.cause for h in state.hypotheses],
+        hypotheses_still_standing=[],
+        lookalikes_checked=lookalikes_measured(list(state.tools_called)),
+        previous_request_addressed="yes",
+        verdict="accept",
+    )
 
 
 def investigate(
@@ -195,6 +214,12 @@ def investigate(
     revision_request: str | None = None
     knowledge_base = load_knowledge() if knowledge is None else knowledge
     knowledge_brief = ""
+    # The critic's memory of itself, which it had none of. Carried here rather
+    # than read back out of `state.verdicts` so the measurement count is
+    # captured at the moment of the review rather than reconstructed.
+    previous_verdict: CriticVerdict | None = None
+    previous_cause: str | None = None
+    measurements_at_last_review = 0
 
     try:
         while True:
@@ -483,14 +508,82 @@ def investigate(
             if critic is False:
                 break
 
+            # Convergence, decided by arithmetic rather than by a model.
+            #
+            # If the previous cycle committed to a cause, this cycle took more
+            # measurements in response to the review, and the answer is *still*
+            # that cause, the investigation has converged. More evidence did not
+            # move it, which is the strongest signal available that another
+            # cycle will not either.
+            #
+            # This is not a shortcut around the guarantees. `inspect_draft` is
+            # the same deterministic half `review` runs — no fabricated numerics,
+            # every look-alike weighed, no abstention naming an unrun tool — so
+            # an answer accepted here has passed every check that does not need
+            # judgement. What it skips is the *opinion*, and the opinion is what
+            # was destroying correct answers: G-001, G-005, G-006 and G-017 all
+            # reached the right cause and were talked out of it.
+            #
+            # It also bounds the loop. A converged answer stops at cycle 2
+            # instead of running to the cap, which is most of the ten minutes.
+            mechanical = inspect_draft(state, out.results, synthesis)
+            if (
+                previous_verdict is not None
+                and previous_cause is not None
+                and synthesis.settled
+                and synthesis.cause == previous_cause
+                and len(out.results) > measurements_at_last_review
+                and mechanical.clean
+            ):
+                verdict = _converged_verdict(state, synthesis)
+                state.verdicts.append(verdict)
+                emit(
+                    TraceStep(
+                        kind="critic",
+                        node="critic",
+                        args={
+                            "cycle": state.cycle,
+                            "verdict": verdict.verdict,
+                            "still_standing": [],
+                            "unsupported_claims": [],
+                            "unchecked_lookalikes": list(verdict.unchecked_lookalikes),
+                            "revision_request": None,
+                            "converged": True,
+                        },
+                        result=(
+                            f"the same answer ({synthesis.cause}) survived "
+                            f"{len(out.results) - measurements_at_last_review} "
+                            "further measurement(s), so the investigation has "
+                            "converged"
+                        ),
+                        was_planned=True,
+                    )
+                )
+                out.stopped_because = (
+                    "the answer did not change after the review's measurements, "
+                    "so the investigation converged"
+                )
+                break
+
             if critic is None:
                 reviewed = run_review(
-                    client, state, brief, out.results, out.errors, synthesis
+                    client,
+                    state,
+                    brief,
+                    out.results,
+                    out.errors,
+                    synthesis,
+                    previous=previous_verdict,
+                    previous_answer=previous_cause,
+                    measurements_since=len(out.results) - measurements_at_last_review,
                 )
                 _accrue(out, reviewed.response)
                 verdict = reviewed.verdict
             else:
                 verdict = critic(state, out.results, synthesis)
+            previous_verdict = verdict
+            previous_cause = synthesis.cause
+            measurements_at_last_review = len(out.results)
             state.verdicts.append(verdict)
             emit(
                 TraceStep(

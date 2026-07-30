@@ -406,3 +406,77 @@ def test_isolated_failures_do_not_trip_the_breaker(
 
     scores, predictions = runner.run_agent_engine(cases)
     assert len(predictions) == 7, "the run should have finished every case"
+
+
+# ===========================================================================
+# Resuming a run that died
+# ===========================================================================
+def test_the_journal_round_trips_a_prediction(tmp_path: Any) -> None:
+    """What resuming needs, and nothing more.
+
+    Not the trace files: those record *how* a case ran and the dashboard reads
+    them. This is the much smaller record of what it concluded.
+    """
+    from eval.metrics import Prediction
+    from eval.runner import _Journal
+
+    path = tmp_path / "run.jsonl"
+    journal = _Journal(path)
+    assert journal.load() == {}
+
+    journal.record(
+        Prediction(
+            case_id="G-017",
+            category="fault",
+            cause="shading",
+            settled=True,
+            tools_called=("time_of_day_profile", "check_ac_ceiling"),
+            cost_usd=0.65,
+        )
+    )
+    journal.record(
+        Prediction(
+            case_id="G-039",
+            category=None,
+            cause=None,
+            settled=False,
+            failed_with="APIStatusError: overloaded_error",
+        )
+    )
+
+    done = journal.load()
+    assert set(done) == {"G-017", "G-039"}
+    assert done["G-017"].cause == "shading"
+    assert done["G-017"].tools_called == ("time_of_day_profile", "check_ac_ceiling")
+    # The failure marker survives, so a resumed run does not re-count a crash as
+    # a chosen abstention.
+    assert done["G-039"].failed_with is not None
+    assert not done["G-039"].abstained
+
+
+def test_a_half_written_last_line_does_not_block_a_resume(tmp_path: Any) -> None:
+    """Exactly what a killed process leaves behind.
+
+    Refusing to resume because the final line is truncated would throw away
+    every case before it — which is the whole thing the journal exists to save.
+    """
+    from eval.runner import _Journal
+
+    path = tmp_path / "run.jsonl"
+    path.write_text(
+        '{"case_id": "G-001", "category": "fault", "cause": "string_outage", '
+        '"settled": true}\n{"case_id": "G-002", "cat'
+    )
+    done = _Journal(path).load()
+    assert set(done) == {"G-001"}
+
+
+def test_no_journal_path_means_no_journal(tmp_path: Any) -> None:
+    """The flag is opt-in; without it nothing is written and nothing is skipped."""
+    from eval.metrics import Prediction
+    from eval.runner import _Journal
+
+    journal = _Journal(None)
+    journal.record(Prediction(case_id="X", category=None, cause=None, settled=False))
+    assert journal.load() == {}
+    assert not list(tmp_path.iterdir())

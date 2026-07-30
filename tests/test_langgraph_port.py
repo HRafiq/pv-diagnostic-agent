@@ -19,9 +19,10 @@ import pytest
 
 from src.agent.llm import ScriptedClient
 from src.agent.loop_graph import investigate_with_graph
-from src.agent.loop_plain import investigate
+from src.agent.loop_plain import InvestigationResult, investigate
 from src.agent.state import AgentState, CriticVerdict
 from src.clock import FrozenClock
+from src.knowledge import load_knowledge
 from src.tools import ToolContext
 from tests.test_agent_loop import (
     _ALL_LOOKALIKES,
@@ -402,3 +403,53 @@ def test_both_loops_refuse_a_window_with_no_data(
             end="2030-01-05",
             critic=False,
         )
+
+
+def test_the_production_path_is_the_graph() -> None:
+    """The port existed, was equivalence-tested, and nothing called it.
+
+    Both the runner and the watcher imported `loop_plain.investigate`, so every
+    run this project ever did used the plain loop and the graph was a second
+    implementation nobody exercised — a liability rather than a safety net. The
+    plain loop remains the specification; it is simply no longer the thing that
+    runs.
+    """
+    import eval.runner
+    import watcher
+
+    assert eval.runner.investigate is investigate_with_graph
+    assert watcher.investigate is investigate_with_graph
+
+
+def test_the_graph_is_compiled_with_a_checkpointer(
+    ctx: ToolContext, clock: FrozenClock
+) -> None:
+    """The one capability the framework was justified by, finally wired.
+
+    Deliberately narrow: an in-memory saver records every node boundary within
+    one investigation and dies with the process, so it does *not* survive the
+    overload and credit failures that actually cost this project cases. That is
+    the runner's journal. What this buys is that within-run resume is possible
+    at all, which the plain loop cannot offer.
+    """
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    from src.agent.loop_graph import _Run, build_graph
+
+    run = _Run(
+        ctx=ctx,
+        client=ScriptedClient(replies={}),
+        clock=clock,
+        brief="brief",
+        default_args={},
+        knowledge=load_knowledge(),
+        critic=False,
+        max_tools_per_cycle=4,
+        writer=None,
+        out=InvestigationResult(
+            investigation_id="X",
+            state=AgentState(investigation_id="X", question="q", scope="s"),
+        ),
+    )
+    assert build_graph(run, checkpointer=InMemorySaver()).checkpointer is not None
+    assert build_graph(run).checkpointer is None

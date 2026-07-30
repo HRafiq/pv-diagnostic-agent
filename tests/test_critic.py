@@ -22,13 +22,19 @@ from src.agent.llm import ScriptedClient
 from src.agent.loop_plain import investigate
 from src.agent.nodes.critic import (
     CRITIC_SCHEMA,
+    inspect_draft,
     lookalikes_measured,
     review,
     unrun_tools_named_in,
 )
 from src.agent.nodes.prompts import lookalike_coverage, lookalike_coverage_text
 from src.agent.nodes.synthesizer import Synthesis
-from src.agent.state import LOOKALIKE_CHECKLIST, AgentState, Hypothesis
+from src.agent.state import (
+    LOOKALIKE_CHECKLIST,
+    AgentState,
+    CriticVerdict,
+    Hypothesis,
+)
 from src.clock import FrozenClock
 from src.findings.models import CandidateCause
 from src.tools import ToolContext, ToolResult
@@ -713,3 +719,97 @@ def test_a_settled_answer_is_not_checked_for_outstanding_measurements() -> None:
         a_synthesis(resolving_measurement="Run string_onset_scan."),
     ).verdict
     assert verdict.verdict == "accept"
+
+
+# ===========================================================================
+# The critic can see its own previous review
+# ===========================================================================
+def test_the_critic_is_shown_what_it_asked_for_last_time() -> None:
+    """The root cause of the send_back loop, and it was an absence.
+
+    The prompt held the brief, the hypotheses, the evidence, the draft and the
+    checklist — and nothing about the critic's own previous review. The planner
+    and synthesiser both receive `revision_request`, so information flowed one
+    way and nothing came back. Every review was a fresh reviewer with unlimited
+    standards and no memory, which is why it re-raised answered objections and
+    could never notice the answer had stopped changing.
+    """
+    client = ScriptedClient(replies={"critic": [a_verdict()]})
+    previous = CriticVerdict(
+        hypotheses_considered=["H1"],
+        verdict="send_back",
+        revision_request="reconcile the sharp onset with characterize_onset",
+    )
+    review(
+        client,
+        a_state([*ALL_TOOLS, "detect_stuck_channels"]),
+        "brief",
+        [a_result("compute_temp_corrected_pr", pr=0.8)],
+        [],
+        a_synthesis(),
+        previous=previous,
+        previous_answer="shading",
+        measurements_since=3,
+    )
+
+    _, _, user = client.calls[-1]
+    assert "YOUR OWN PREVIOUS REVIEW" in user
+    assert "reconcile the sharp onset" in user
+    assert "3 further measurement" in user
+    assert "shading" in user
+    assert "converged" in user
+
+
+def test_a_first_review_is_not_told_about_a_previous_one() -> None:
+    client = ScriptedClient(replies={"critic": [a_verdict()]})
+    review(
+        client,
+        a_state([*ALL_TOOLS, "detect_stuck_channels"]),
+        "brief",
+        [a_result("compute_temp_corrected_pr", pr=0.8)],
+        [],
+        a_synthesis(),
+    )
+    _, _, user = client.calls[-1]
+    assert "YOUR OWN PREVIOUS REVIEW" not in user
+
+
+def test_the_critic_must_say_whether_its_request_was_addressed() -> None:
+    """A structured field, so it cannot be answered by not mentioning it."""
+    considered = CRITIC_SCHEMA["properties"]["previous_request_addressed"]
+    assert considered["enum"] == ["yes", "no", "no_previous_request"]
+    assert "previous_request_addressed" in CRITIC_SCHEMA["required"]
+
+    client = ScriptedClient(
+        replies={"critic": [a_verdict(previous_request_addressed="yes")]}
+    )
+    verdict = review(
+        client,
+        a_state([*ALL_TOOLS, "detect_stuck_channels"]),
+        "brief",
+        [a_result("compute_temp_corrected_pr", pr=0.8)],
+        [],
+        a_synthesis(),
+    ).verdict
+    assert verdict.previous_request_addressed == "yes"
+
+
+def test_the_deterministic_checks_are_shared_with_the_convergence_stop() -> None:
+    """One implementation, so the two paths cannot enforce different rules."""
+    state = a_state(["check_ac_ceiling"])
+    synthesis = a_synthesis(answer="a made-up 0.4213", summary="a made-up 0.4213")
+    objections = inspect_draft(
+        state, [a_result("check_ac_ceiling", peak=1.0)], synthesis
+    )
+
+    assert not objections.clean
+    assert any("0.4213" in c for c in objections.unsupported)
+    assert "telemetry_gap" in objections.unmeasured
+    assert objections.as_request()
+
+    clean = inspect_draft(
+        a_state([*ALL_TOOLS, "detect_stuck_channels"]),
+        [a_result("compute_temp_corrected_pr", pr=0.8)],
+        a_synthesis(),
+    )
+    assert clean.clean and clean.as_request() is None

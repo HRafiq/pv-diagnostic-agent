@@ -100,6 +100,14 @@ class CriticVerdict(BaseModel):
         ),
     )
     lookalikes_checked: list[str] = Field(default_factory=list)
+    previous_request_addressed: Literal["yes", "no", "no_previous_request"] = Field(
+        default="no_previous_request",
+        description=(
+            "Whether the investigation did what this critic asked for on the "
+            "previous cycle. The critic could not previously see its own past "
+            "reviews at all, so it re-raised answered objections indefinitely."
+        ),
+    )
     verdict: Literal["accept", "send_back", "not_enough_evidence"]
     revision_request: str | None = Field(
         default=None,

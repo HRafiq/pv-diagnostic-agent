@@ -27,6 +27,7 @@ looser, which is the only direction that is safe.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 from pydantic import ValidationError
@@ -46,7 +47,9 @@ from src.tools import ToolResult, tool_names
 
 __all__ = [
     "CRITIC_SCHEMA",
+    "MechanicalObjections",
     "Review",
+    "inspect_draft",
     "lookalikes_measured",
     "review",
     "unrun_tools_named_in",
@@ -64,6 +67,7 @@ CRITIC_SCHEMA: dict[str, Any] = {
         "unsupported_claims",
         "lookalikes_considered",
         "revision_request",
+        "previous_request_addressed",
     ],
     "properties": {
         "verdict": {
@@ -114,6 +118,17 @@ CRITIC_SCHEMA: dict[str, Any] = {
                 "Required on send_back. Must name a cause and a tool: 'exclude "
                 "curtailment by checking the ceiling level against the "
                 "inverter rating', not 'consider other causes'. Empty otherwise."
+            ),
+        },
+        "previous_request_addressed": {
+            "type": "string",
+            "enum": ["yes", "no", "no_previous_request"],
+            "description": (
+                "Did the investigation do what you asked for last time? "
+                "'no_previous_request' on the first review. Answering 'yes' and "
+                "then sending back for something else is how a review becomes "
+                "an unbounded loop — say so only if a specific measurement "
+                "would change which cause is named."
             ),
         },
     },
@@ -170,6 +185,98 @@ def unrun_tools_named_in(text: str | None, tools_called: list[str]) -> list[str]
     return [n for n in tool_names() if n in said and n not in called]
 
 
+def _what_you_asked_last_time(
+    previous: CriticVerdict | None,
+    previous_answer: str | None,
+    measurements_since: int,
+) -> list[str]:
+    """The critic's own history, which it could not previously see."""
+    if previous is None:
+        return []
+
+    lines = [
+        "",
+        "YOUR OWN PREVIOUS REVIEW OF THIS INVESTIGATION",
+        f"You returned '{previous.verdict}' and asked for: "
+        + (previous.revision_request or "(nothing specific)"),
+        f"Since then the investigation took {measurements_since} further "
+        "measurement(s), listed above.",
+    ]
+    if previous_answer is not None:
+        lines.append(
+            f"The previous draft committed to: {previous_answer}. "
+            "Compare it with the draft below."
+        )
+    lines.append(
+        "Judge whether what you asked for was done. If it was, and the answer "
+        "is unchanged, that is evidence the investigation has converged and "
+        "should be accepted — not a reason to find something new. Asking for "
+        "one more thing is always possible and is not free: every send_back "
+        "costs another full cycle. Send back only if a *specific* measurement "
+        "would change which cause is named."
+    )
+    return lines
+
+
+@dataclass(frozen=True)
+class MechanicalObjections:
+    """Everything wrong with a draft that needs no model to establish.
+
+    Factored out of `review` so the convergence stop in `loop_plain` can apply
+    the identical guarantees without paying for a review. An answer that skips
+    the critic must not thereby skip "no fabricated numerics" or "every
+    look-alike was weighed" — those are arithmetic, and arithmetic is free.
+    """
+
+    unsupported: list[str]
+    unmeasured: list[str]
+    avoidable: list[str]
+
+    @property
+    def clean(self) -> bool:
+        return not (self.unsupported or self.unmeasured or self.avoidable)
+
+    def as_request(self) -> str | None:
+        """The repair instruction, or None when there is nothing to repair."""
+        if self.avoidable:
+            return (
+                "the answer declines to commit but names "
+                + ", ".join(self.avoidable)
+                + " as what would resolve it, and that measurement was never "
+                "taken. Run it. An abstention is only honest when the evidence "
+                "cannot be obtained, not when it has not been collected yet."
+            )
+        if self.unsupported or self.unmeasured:
+            return _repair_request(self.unsupported, self.unmeasured)
+        return None
+
+
+def inspect_draft(
+    state: AgentState, results: list[ToolResult], synthesis: Synthesis
+) -> MechanicalObjections:
+    """The deterministic half of a review. No LLM call, no judgement."""
+    grounding = check_numeric_grounding(
+        "\n".join([synthesis.answer, synthesis.summary]),
+        ledger_of(results),
+        quotable=synthesis.citable,
+    )
+    unsupported = list(dict.fromkeys(grounding.as_claims()))
+    if synthesis.build_error:
+        unsupported.append(synthesis.build_error)
+
+    measured = lookalikes_measured(list(state.tools_called))
+    unmeasured = sorted(set(LOOKALIKE_CHECKLIST) - set(measured))
+
+    avoidable = (
+        unrun_tools_named_in(synthesis.resolving_measurement, list(state.tools_called))
+        if not synthesis.settled
+        else []
+    )
+    return MechanicalObjections(
+        unsupported=unsupported, unmeasured=unmeasured, avoidable=avoidable
+    )
+
+
 class Review:
     """The critic's verdict plus what it cost."""
 
@@ -185,8 +292,37 @@ def review(
     results: list[ToolResult],
     errors: list[str],
     synthesis: Synthesis,
+    previous: CriticVerdict | None = None,
+    previous_answer: str | None = None,
+    measurements_since: int = 0,
 ) -> Review:
-    """Review one draft answer and return a structured verdict."""
+    """Review one draft answer and return a structured verdict.
+
+    Args:
+        previous: The verdict this critic returned on the last cycle, if any.
+        previous_answer: The cause the last cycle committed to, for comparison.
+        measurements_since: How many measurements were taken in response.
+
+    Those three arguments are the fix for the failure that dominated every run
+    of this project. The critic's prompt held the brief, the hypotheses, the
+    evidence, the draft and the checklist — and **nothing about its own previous
+    review**. Meanwhile the planner and synthesiser both receive
+    `revision_request`, so information flowed one way and nothing came back.
+
+    Every review was therefore a fresh reviewer meeting the case for the first
+    time, with unlimited standards and no memory. It could not say "you
+    addressed my concern", because it did not know it had one; it re-raised the
+    same point in different words; and it could not notice that the answer had
+    not changed, which is the strongest available evidence of convergence. A
+    competent reviewer always finds something and nothing priced another cycle,
+    so `send_back` was the equilibrium rather than an accident.
+
+    Observed four times: G-001, G-005, G-006 and G-017 each reached the right
+    answer and were talked out of it. G-017's two send_backs were "reconcile the
+    sharp onset detected by characterize_onset" and then "split the string-1
+    evidence around the 2017-03-16" — the same objection, asked twice, after the
+    first had been answered with three more measurements.
+    """
     draft = "\n".join(
         [
             f"settled: {synthesis.settled}",
@@ -228,6 +364,7 @@ def review(
             "",
             "LOOK-ALIKES THAT MUST BE WEIGHED ON EVERY INVESTIGATION",
             lookalike_coverage_text(),
+            *_what_you_asked_last_time(previous, previous_answer, measurements_since),
         ]
     )
 
@@ -237,15 +374,9 @@ def review(
     payload = response.parsed or {}
 
     # --- the parts the model does not get to decide ------------------------
-    grounding = check_numeric_grounding(
-        "\n".join([synthesis.answer, synthesis.summary]),
-        ledger_of(results),
-        # What the synthesiser was shown, carried on the draft. Rebuilding it
-        # here would leave out the knowledge text — which the critic is not
-        # given — and the physics the agent was handed would be scored as
-        # invented. That is not hypothetical: it cost a correct answer.
-        quotable=synthesis.citable,
-    )
+    # The deterministic half, shared with `loop_plain`'s convergence stop so the
+    # two paths cannot enforce different guarantees.
+    mechanical = inspect_draft(state, results, synthesis)
     # Two kinds of objection, deliberately not merged.
     #
     # `unsupported` is what the *arithmetic* found: a figure in the prose that
@@ -265,9 +396,7 @@ def review(
     # into a wrong abstention. The observations were good — one of them
     # independently identified a real defect in the fault injector — which is
     # exactly why they must inform the next cycle rather than end it.
-    unsupported = list(dict.fromkeys(grounding.as_claims()))
-    if synthesis.build_error:
-        unsupported.append(synthesis.build_error)
+    unsupported = mechanical.unsupported
 
     observations = [
         str(c)
@@ -278,6 +407,7 @@ def review(
     # What the run measured, regardless of what the critic thought to mention.
     # See `lookalikes_measured` for why the critic's own list is not consulted.
     measured = lookalikes_measured(list(state.tools_called))
+    unmeasured = mechanical.unmeasured
 
     still_standing = [str(x) for x in payload.get("hypotheses_still_standing", [])]
     wanted = str(payload.get("verdict", "send_back"))
@@ -285,7 +415,6 @@ def review(
 
     # --- the verdict, tightened but never loosened -------------------------
     verdict = wanted
-    unmeasured = sorted(set(LOOKALIKE_CHECKLIST) - set(measured))
     if wanted == "accept" and (unsupported or unmeasured):
         verdict = "send_back"
         request = request or _repair_request(unsupported, unmeasured)
@@ -306,11 +435,7 @@ def review(
     # Deliberately applied to `accept` as well: a reviewer that waves through
     # an abstention with an available next step has made the same mistake as one
     # that wrote it.
-    avoidable = (
-        unrun_tools_named_in(synthesis.resolving_measurement, list(state.tools_called))
-        if not synthesis.settled
-        else []
-    )
+    avoidable = mechanical.avoidable
     if verdict != "send_back" and avoidable:
         verdict = "send_back"
         # This message replaces rather than defers to the model's own, because
@@ -366,6 +491,9 @@ def review(
             hypotheses_still_standing=still_standing,
             unsupported_claims=unsupported,
             observations=observations,
+            previous_request_addressed=str(
+                payload.get("previous_request_addressed") or "no_previous_request"
+            ),
             lookalikes_checked=measured,
             verdict=verdict,
             revision_request=request if verdict == "send_back" else None,

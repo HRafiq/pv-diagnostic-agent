@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import time
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -28,7 +29,12 @@ from eval.progress import StepPrinter
 from eval.scenarios import materialise
 from eval.subset import describe, select, warn_about
 from src.agent.llm import BudgetExceeded, build_client, is_systemic_request_error
-from src.agent.loop_plain import investigate
+
+# The graph, not the plain loop. Both produce identical results
+# (`tests/test_langgraph_port.py`), the plain loop remains the specification,
+# and the port had sat unused since it was written — a second implementation
+# nobody ran is a liability, not a safety net.
+from src.agent.loop_graph import investigate_with_graph as investigate
 from src.baseline.rules import RulesEngine
 from src.config import REPO_ROOT, Settings, build_clock
 from src.data.plant import load_plant
@@ -58,6 +64,54 @@ def _system_metadata(system_id: int) -> tuple[SystemMetadata, float]:
     meta = SystemMetadata(**{**manifest["system_metadata"], "raw": {}})
     gamma = module_gamma_pdc(meta.module_model) or -0.0040
     return meta, gamma
+
+
+class _Journal:
+    """Per-case results, written as they happen so a dead run can be resumed.
+
+    One JSON object per line, appended the moment a case finishes. Append-only
+    and flushed each time: a process killed mid-write loses at most the case it
+    was working on, and every case before it is still there.
+
+    Deliberately not the trace files. Traces are the record of *how* a case ran
+    and the dashboard reads them; this is the much smaller record of *what* it
+    concluded, which is all that resuming needs.
+    """
+
+    def __init__(self, path: Path | None) -> None:
+        self.path = path
+
+    def load(self) -> dict[str, Prediction]:
+        if self.path is None or not self.path.exists():
+            return {}
+        out: dict[str, Prediction] = {}
+        for line in self.path.read_text().splitlines():
+            if not line.strip():
+                continue
+            try:
+                payload = json.loads(line)
+                out[str(payload["case_id"])] = Prediction(
+                    **{
+                        **payload,
+                        "candidate_causes": tuple(payload.get("candidate_causes", [])),
+                        "tools_called": tuple(payload.get("tools_called", [])),
+                        "unplanned_tools": tuple(payload.get("unplanned_tools", [])),
+                    }
+                )
+            except (json.JSONDecodeError, KeyError, TypeError):
+                # A half-written final line is exactly what a killed process
+                # leaves. Skip it and re-run that one case rather than refusing
+                # to resume at all.
+                continue
+        return out
+
+    def record(self, prediction: Prediction) -> None:
+        if self.path is None:
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self.path.open("a") as handle:
+            handle.write(json.dumps(asdict(prediction), default=str) + "\n")
+            handle.flush()
 
 
 def run_rules_engine(cases: list[Any]) -> tuple[list[CaseScore], list[Prediction]]:
@@ -101,13 +155,26 @@ def run_agent_engine(
     review: bool = True,
     use_knowledge: bool = True,
     verbose: bool = True,
+    resume_from: Path | None = None,
 ) -> tuple[list[CaseScore], list[Prediction]]:
-    """Run the plain-Python investigation loop over the golden set.
+    """Run the investigation loop over the golden set.
 
     Every case gets a fresh client, so one investigation's budget cannot be
     spent by another and the per-question cost figure means what it says.
     Traces are written per case and are what the dashboard's Investigate tab
     replays.
+
+    Args:
+        resume_from: A journal written case-by-case as the run proceeds. Cases
+            already in it are skipped and their results reused.
+
+            This is the resumability that matters, and it is deliberately *not*
+            LangGraph's. A checkpointer resumes one investigation across node
+            boundaries; the failures this project actually hit — an API overload
+            at case 6, an exhausted credit balance mid-answer — kill the
+            interpreter, and an in-memory saver dies with it. What is expensive
+            to lose is the twenty cases already paid for, and only a file
+            survives that.
     """
     settings = Settings.from_env()
     clock = build_clock()
@@ -119,6 +186,10 @@ def run_agent_engine(
     scores: list[CaseScore] = []
     predictions: list[Prediction] = []
     failures: list[tuple[str, str]] = []
+    journal = _Journal(resume_from)
+    done = journal.load()
+    if done:
+        print(f"  resuming: {len(done)} case(s) already recorded, skipping them")
     # A run that has failed this many cases in a row is not meeting bad luck;
     # something outside the cases is broken — usually the network. Continuing
     # burns the rest of the case list at zero work each, which is what four
@@ -127,6 +198,13 @@ def run_agent_engine(
     consecutive_failures = 0
 
     for case in cases:
+        recorded = done.get(str(case.id))
+        if recorded is not None:
+            predictions.append(recorded)
+            scores.append(score_case(case, recorded))
+            print(f"\n  {case.id}  (already recorded, skipping)")
+            continue
+
         bundle = load_plant(case.system_id, DATA_DIR)
         materialised = materialise(case, DATA_DIR)
         # The whole record, perturbed inside the case window. The agent is
@@ -208,6 +286,7 @@ def run_agent_engine(
                 )
             )
             scores.append(score_case(case, predictions[-1]))
+            journal.record(predictions[-1])
             if consecutive_failures >= _CONSECUTIVE_FAILURE_LIMIT:
                 raise RuntimeError(
                     f"{consecutive_failures} cases in a row failed, the last "
@@ -248,6 +327,7 @@ def run_agent_engine(
             )
         )
         scores.append(score_case(case, predictions[-1]))
+        journal.record(predictions[-1])
         print(
             f"  -> {case.id}  {len(out.tools_called)} measurements, "
             f"{len(out.unplanned_tools)} unplanned, "
@@ -286,6 +366,7 @@ def _run_engine(
         review=not getattr(args, "no_review", False),
         use_knowledge=not getattr(args, "no_knowledge", False),
         verbose=not getattr(args, "quiet", False),
+        resume_from=(Path(args.resume) if getattr(args, "resume", None) else None),
     )
 
 
@@ -670,6 +751,17 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     p_run.add_argument("--out", type=str, default=None)
+    p_run.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        metavar="FILE",
+        help=(
+            "Record each case to FILE as it finishes, and skip cases already "
+            "in it. Re-run the same command with the same FILE after a run "
+            "dies and it picks up where it stopped."
+        ),
+    )
     p_run.add_argument(
         "--no-review",
         action="store_true",
