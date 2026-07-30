@@ -189,6 +189,53 @@ class ProfileArgs(WindowArgs):
     min_poa_wm2: float = Field(default=300.0, gt=0.0)
 
 
+def _profiles_over(block: pd.DataFrame, currents: list[str]) -> dict[str, float]:
+    """Each string's level against the array median, as a regression slope."""
+    reference = block.median(axis=1)
+    if float(reference.std()) <= 0:
+        return {}
+    out: dict[str, float] = {}
+    for column in currents:
+        series = block[column]
+        if float(series.std()) <= 0:
+            out[column] = 0.0
+            continue
+        out[column] = float(
+            np.polyfit(reference.to_numpy(float), series.to_numpy(float), 1)[0]
+        )
+    return out
+
+
+def _reference_levels(
+    ctx: ToolContext, args: ProfileArgs, currents: list[str], window: pd.DataFrame
+) -> dict[str, float]:
+    """The same levels over the record *before* this window.
+
+    Without it, a string that has always carried less than its neighbours reads
+    as a deficit in every window ever scored. That is not hypothetical: G-004
+    committed to `string_outage` on a soiling case, and the sentence it quoted
+    was "String 7 is running at only 0.791 of the array's median level" — a
+    permanent characteristic of this array, reported as though it had just
+    happened.
+
+    `per_mppt_current_balance` was given the same treatment first (DECISION
+    0079); this tool has the identical hole and is the one the wrong answer
+    actually rested on. A fix applied to one of two tools that make the same
+    comparison is half a fix.
+    """
+    start = window.index.min()
+    history = ctx.frame.loc[ctx.frame.index < start]
+    if len(history) < len(window):
+        return {}
+    lit = pd.to_numeric(history.get("poa_wm2"), errors="coerce") >= args.min_poa_wm2
+    if not lit.any():
+        return {}
+    block = history.loc[lit, currents].apply(pd.to_numeric, errors="coerce")
+    if len(block) < 100:
+        return {}
+    return _profiles_over(block, currents)
+
+
 def compare_string_profiles(ctx: ToolContext, args: ProfileArgs) -> ToolResult:
     """Each string's daily shape against the array's, not just its level.
 
@@ -255,6 +302,36 @@ def compare_string_profiles(ctx: ToolContext, args: ProfileArgs) -> ToolResult:
         }
     )
 
+    baseline = _reference_levels(ctx, args, currents, window)
+    level_note = ""
+    if baseline:
+        moves = {c: slopes[c] - baseline[c] for c in currents if c in baseline}
+        fallen = min(moves, key=lambda c: moves[c])
+        values.update(
+            {
+                f"baseline_level_string_{str(c).rsplit('_', 1)[-1]}": v
+                for c, v in baseline.items()
+            }
+        )
+        values.update(
+            {
+                f"level_change_string_{str(c).rsplit('_', 1)[-1]}": v
+                for c, v in moves.items()
+            }
+        )
+        values.update(
+            {
+                "largest_level_fall": float(-min(moves.values())),
+                "largest_level_fall_string": float(int(str(fallen).rsplit("_", 1)[-1])),
+                "weakest_shape_baseline_level": float(baseline.get(worst, 0.0)),
+                "weakest_shape_level_change": float(moves.get(worst, 0.0)),
+            }
+        )
+        level_note = (
+            f" Against its own history it carried {baseline[worst]:.3f}, so its "
+            f"level has moved {moves[worst]:+.3f}."
+        )
+
     return ToolResult(
         tool="compare_string_profiles",
         summary=(
@@ -262,7 +339,7 @@ def compare_string_profiles(ctx: ToolContext, args: ProfileArgs) -> ToolResult:
             f"{min(correlations.values()):.3f}, the weakest of "
             f"{len(currents)}; the best is "
             f"{max(correlations.values()):.3f}. Its level relative to the array "
-            f"median is {slopes[worst]:.3f}."
+            f"median is {slopes[worst]:.3f}." + level_note
         ),
         values=values,
         labels={"weakest_shape_channel": worst},
@@ -271,6 +348,21 @@ def compare_string_profiles(ctx: ToolContext, args: ProfileArgs) -> ToolResult:
             "a string scaled down by a constant keeps a shape match near 1.0; "
             "level and shape are different measurements and a fault may move "
             "only one of them",
+            *(
+                [
+                    "level is measured against the array's other strings, not "
+                    "against nameplate: a string can sit below its neighbours "
+                    "for the whole record without anything having failed. The "
+                    "change from its own history is what separates a standing "
+                    "difference from a new one"
+                ]
+                if baseline
+                else [
+                    "no history before this window, so a string sitting below "
+                    "its neighbours cannot be told apart from one that has "
+                    "been low since the record began"
+                ]
+            ),
         ],
     )
 

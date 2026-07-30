@@ -387,9 +387,29 @@ def test_a_step_reports_two_levels_and_a_short_transition(
     stepped.loc[after, "ac_power_kw"] *= 0.8
 
     values = run_tool("characterize_onset", context_for(stepped), {}).values
-    assert values["absolute_change"] > 0.1
+    # Negative, because it fell. This read `> 0.1` while the field was
+    # `before - after`, so a metric going 0.891 -> 0.794 reported "a change of
+    # +0.097" — the words said it dropped, the sign said it rose, and the test
+    # agreed with the sign.
+    assert values["absolute_change"] < -0.1
+    assert values["change_magnitude"] > 0.1
+    assert values["relative_change"] < 0
     assert values["days_in_transition"] <= 1
     assert values["change_over_scatter"] > 5
+
+
+def test_a_recovery_is_reported_as_a_rise(plant: pd.DataFrame) -> None:
+    """The same tool, pointed the other way. Half the golden cases ask "has
+    something got better?", so a rise must not be reported as a fall."""
+    lifted = plant.copy()
+    after = pd.DatetimeIndex(lifted.index) >= pd.Timestamp("2017-04-08", tz="UTC")
+    lifted.loc[after, "ac_power_kw"] *= 1.25
+
+    result = run_tool("characterize_onset", context_for(lifted), {})
+    assert result.values["absolute_change"] > 0.1
+    assert result.values["change_magnitude"] > 0.1
+    assert "rose by" in result.summary
+    assert "fell by" not in result.summary
 
 
 def test_a_ramp_spends_days_in_transition(plant: pd.DataFrame) -> None:
@@ -880,3 +900,84 @@ def test_no_history_says_so_rather_than_reporting_no_change() -> None:
     )
     assert "largest_share_drop" not in result.values
     assert any("no history before this window" in c for c in result.caveats)
+
+
+def test_a_string_that_has_always_been_low_shows_no_level_change() -> None:
+    """The number that carried G-004's wrong answer.
+
+    The agent quoted "String 7 is running at only 0.791 of the array's median
+    level" and committed to `string_outage` on a soiling case. String 7 has
+    carried that share for the whole record. `per_mppt_current_balance` was
+    given a baseline first; this tool makes the same comparison, had the same
+    hole, and is the one the wrong answer actually rested on.
+    """
+    rng = np.random.default_rng(3)
+    frame = synthetic_frame(days=90, start="2017-01-01")
+    columns = [f"string_current_a_{n}" for n in range(1, 8)]
+    total = frame[columns].sum(axis=1)
+    # Permanently low *and* slightly noisy, so it is the weakest shape too —
+    # which is what G-004's string 7 looked like, at a match of 0.986.
+    frame["string_current_a_7"] = total * 0.125 * (1 + rng.normal(0, 0.02, len(frame)))
+    for n in range(1, 7):
+        frame[f"string_current_a_{n}"] = total * (1 - 0.125) / 6
+
+    window = {"start": "2017-03-15T00:00:00Z", "end": "2017-03-29T00:00:00Z"}
+    result = run_tool("compare_string_profiles", context_for(frame), window)
+
+    # Still honestly low against its neighbours — the tool does not hide it.
+    assert result.values["level_string_7"] == pytest.approx(0.85, abs=0.03)
+    # And unchanged against its own history, which is the discriminating fact.
+    assert result.values["level_change_string_7"] == pytest.approx(0.0, abs=0.02)
+    assert "its level has moved -0.00" in result.summary
+
+
+def test_a_string_that_actually_drops_shows_a_level_change() -> None:
+    """A standing offset and a real fault on the *same* string, told apart.
+
+    The level alone cannot: 0.85 and 0.56 are both "low". The change can.
+    """
+    rng = np.random.default_rng(3)
+    frame = synthetic_frame(days=90, start="2017-01-01")
+    columns = [f"string_current_a_{n}" for n in range(1, 8)]
+    total = frame[columns].sum(axis=1)
+    frame["string_current_a_7"] = total * 0.125 * (1 + rng.normal(0, 0.02, len(frame)))
+    for n in range(1, 7):
+        frame[f"string_current_a_{n}"] = total * (1 - 0.125) / 6
+    frame.loc[frame.index >= "2017-03-20", "string_current_a_7"] *= 0.5
+
+    window = {"start": "2017-03-15T00:00:00Z", "end": "2017-03-29T00:00:00Z"}
+    result = run_tool("compare_string_profiles", context_for(frame), window)
+
+    assert result.values["level_change_string_7"] < -0.2
+    assert result.values["largest_level_fall"] > 0.2
+    assert result.values["largest_level_fall_string"] == 7.0
+
+
+def test_without_history_the_level_says_it_cannot_be_compared() -> None:
+    frame = synthetic_frame(days=20, start="2017-01-01")
+    result = run_tool(
+        "compare_string_profiles",
+        context_for(frame),
+        {"start": "2017-01-01T00:00:00Z", "end": "2017-01-15T00:00:00Z"},
+    )
+    assert "level_change_string_7" not in result.values
+    assert any("no history before this window" in c for c in result.caveats)
+
+
+def test_the_share_says_it_is_a_whole_window_average() -> None:
+    """Two tools reported string 7 moving -0.0090 and -0.0017 and neither said
+    why they differ.
+
+    They measure different things: `string_onset_scan` compares before and
+    after a change-point inside the window, this averages the whole window, so
+    a step part-way through is diluted. Both correct; the agent had no way to
+    reconcile a 5x gap.
+    """
+    frame = _plant_with_a_standing_offset()
+    result = run_tool(
+        "per_mppt_current_balance",
+        context_for(frame),
+        {"start": "2017-03-15T00:00:00Z", "end": "2017-03-29T00:00:00Z"},
+    )
+    assert any("whole-window average" in c for c in result.caveats)
+    assert any("string_onset_scan" in c for c in result.caveats)

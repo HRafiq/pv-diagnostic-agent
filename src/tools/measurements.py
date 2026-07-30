@@ -476,7 +476,12 @@ def per_mppt_current_balance(ctx: ToolContext, args: BalanceArgs) -> ToolResult:
                     "array's: a string can sit below it for the whole record "
                     "without anything having failed. The change from its own "
                     "baseline is what separates a standing offset from a new "
-                    "fault"
+                    "fault",
+                    "the change from baseline is a whole-window average, so a "
+                    "step part-way through this window is diluted by the days "
+                    "either side of it — string_onset_scan compares before and "
+                    "after a change-point instead, and a larger figure there "
+                    "than here means the change is recent rather than absent",
                 ]
                 if baseline is not None
                 else [
@@ -820,15 +825,24 @@ def characterize_onset(ctx: ToolContext, args: OnsetArgs) -> ToolResult:
         tool="characterize_onset",
         summary=(
             f"Daily {args.metric} averages {before:.3f} before "
-            f"{onset_stamp.date()} and {after:.3f} after, a change of "
-            f"{drop:+.3f} against a day-to-day scatter of {scatter:.3f}, with "
+            f"{onset_stamp.date()} and {after:.3f} after, so it "
+            f"{'fell' if drop > 0 else 'rose'} by {abs(drop):.3f} "
+            f"against a day-to-day scatter of {scatter:.3f}, with "
             f"{in_transit} days spent between the two levels."
         ),
         values={
             "level_before": before,
             "level_after": after,
-            "absolute_change": drop,
-            "relative_change": drop / before if before else 0.0,
+            # After minus before, so a fall is negative. It was `before -
+            # after`, which printed a metric going 0.891 -> 0.794 as "a change
+            # of +0.097" — the words said it dropped and the sign said it rose,
+            # in a field called `absolute_change`. Anything reading the tape,
+            # model or human, had to guess which to believe.
+            "absolute_change": after - before,
+            "relative_change": (after - before) / before if before else 0.0,
+            # The magnitude, kept separately for anything that wants "how big
+            # was the step" without caring which way.
+            "change_magnitude": abs(drop),
             "days_in_transition": float(in_transit),
             "days_before": float(best_k),
             "days_after": float(n - best_k),

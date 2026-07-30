@@ -2645,3 +2645,95 @@ The general point, which this project keeps rediscovering: the evaluation
 harness is not only for producing scores. Half the bugs found in the last week —
 the ledger collision, the standing offset, the concatenated traces — were
 invisible until something was built to look at what had already been recorded.
+
+---
+
+## 0083 — What `explain` found on G-004 (2026-07-30)
+
+The first case read in full rather than through a 96-character clip, and it
+changes what the remaining error is about.
+
+**The reasoning is not the problem.** The router's `reason_for_choosing` fields
+are real differential diagnosis, unprompted:
+
+> *"soiling should show smooth decline with occasional rain-day jumps, but a
+> string outage shows exactly one step."*
+
+That is the correct discriminator. It then **measured that discriminator three
+times and cited none of the results**:
+
+| measurement | reading |
+| --- | --- |
+| `soiling_recovery_pattern` | −0.00627/day across 5 dry stretches, **+0.0017 after 7 low-insolation days** |
+| `daily_performance_trend` | R² **0.02**, with **10 single-day recoveries of ≥0.01** |
+| `characterize_onset` | **14 days spent between the two levels** |
+
+Ten recoveries and a fortnight-long transition. By its own stated test, that is
+soiling and it is not close.
+
+**What it cited instead were two artefacts.**
+
+*"String 7 is running at only 0.791 of the array's median level"* —
+`compare_string_profiles`, which had the identical standing-offset hole DECISION
+0079 fixed in `per_mppt_current_balance`. Half a fix: two tools make the same
+comparison and only one of them was given a baseline. This is the number the
+wrong answer rested on.
+
+*"its current share sits below every other string (0.125 against an even
+0.143)"* — it quoted the even-share clause and skipped the baseline clause **in
+the same sentence**, which read "string 7 carried 0.127 before this window, so
+it has moved −0.0017". The 0079 fix worked; the disconfirming evidence was
+present and correctly computed, and the agent preferred the framing that
+confirmed its hypothesis.
+
+That last point is worth keeping separate from the fixes. Correcting the tools
+raises the floor. It does not establish that the reasoning is sound, and G-004
+is evidence that it is not reliably so.
+
+---
+
+## 0084 — `characterize_onset` printed a fall as a rise (2026-07-30)
+
+```
+averages 0.891 before 2017-05-28 and 0.794 after, a change of +0.097
+```
+
+`drop = before - after`, emitted as a signed "change". The words say it fell,
+the sign says it rose, and the field carrying it is called `absolute_change` —
+which any reader takes as after minus before. Reproduced offline: 0.854 → 0.768
+printed `+0.085`, with `absolute_change = +0.0854` and `relative_change = +0.1`.
+
+`absolute_change` and `relative_change` are now after minus before, so a fall is
+negative; `change_magnitude` keeps the unsigned size for anything that wants
+"how big was the step". The sentence says "fell by" or "rose by" rather than
+handing the reader a sign to interpret.
+
+Its test asserted `absolute_change > 0.1` on a *drop*, so the test agreed with
+the bug — which is how it survived. There is now a companion test for a rise,
+because half the golden cases ask "has something got better?" and a recovery
+reported as a fall is the same bug pointing the other way.
+
+---
+
+## 0085 — Two tools disagreed by 5× and neither said why (2026-07-30)
+
+On G-004:
+
+* `string_onset_scan` — string 7 moved **−0.0090**, 16.9× its own scatter
+* `per_mppt_current_balance` — string 7 moved **−0.0017** from baseline
+
+Both correct. They measure different things: the onset scan compares before and
+after a change-point *inside* the window, while the share compares the
+whole-window mean against the record before it, so a step part-way through is
+diluted by the days either side of it. Nothing in either summary said so, and
+the agent was left to reconcile a 5× gap with no basis for doing it.
+
+The share tool now says it is a whole-window average and names
+`string_onset_scan` as the instrument for locating a change-point — including
+the inference that matters: a larger figure there than here means the change is
+recent rather than absent.
+
+This is a general hazard in a tool set built to be composed. Each tool is
+individually honest and the composition can still mislead, because a reader
+cannot know which of two disagreeing measurements answers their question unless
+the tools say what question they answer.
