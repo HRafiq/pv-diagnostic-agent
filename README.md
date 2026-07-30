@@ -341,6 +341,9 @@ reported that standing characteristic as a deficit. See DECISION 0079 and 0083.
   in the eight-case figures above. Across every case seen so far the reviewer
   has improved one answer and talked four correct ones out of themselves.
 
+`docs/WALKTHROUGH.md` explains the whole project end to end — problem,
+architecture, data, tools, guarantees, evaluation, watcher, dashboard — and is
+the place to start if you are reading this repository for the first time.
 `docs/FINDINGS.md` has the full detail, including a section on the bugs the
 evaluation found in *itself* — each of which would have made a published accuracy
 figure meaningless.
