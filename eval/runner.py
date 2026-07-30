@@ -518,6 +518,25 @@ def _cmd_experiments(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_explain(args: argparse.Namespace) -> int:
+    """Read one case's whole reasoning. The live display clips at the terminal
+    width, which is right for watching and wrong for diagnosing."""
+    from eval.profile import explain
+
+    root = Path(args.traces) if args.traces else TRACE_DIR / "eval"
+    case = str(args.case)
+    path = root / f"{case}.jsonl"
+    if not path.exists():
+        path = root / f"INV-{case}.jsonl"
+    if not path.exists():
+        print(f"\nno trace for {case} under {root}")
+        return 1
+
+    print()
+    print(explain(path, attempt=args.attempt))
+    return 0
+
+
 def _cmd_profile(args: argparse.Namespace) -> int:
     """Read runs already paid for, rather than estimating from call counts."""
     from eval.profile import profile_traces, render, summary
@@ -865,6 +884,20 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_prof.add_argument("--out", type=str, default=None)
     p_prof.set_defaults(func=_cmd_profile)
+
+    p_exp2 = sub.add_parser(
+        "explain",
+        help="One case's reasoning in full, from its trace. No API calls.",
+    )
+    p_exp2.add_argument("case", help="Case id, e.g. G-004.")
+    p_exp2.add_argument(
+        "--attempt",
+        type=int,
+        default=None,
+        help="Which run of this case (1 = first). Defaults to the most recent.",
+    )
+    p_exp2.add_argument("--traces", type=str, default=None, metavar="DIR")
+    p_exp2.set_defaults(func=_cmd_explain)
 
     p_ret = sub.add_parser(
         "retrieval", help="Score retrieval over the golden queries and ablate."

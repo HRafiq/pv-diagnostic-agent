@@ -32,6 +32,7 @@ from src.agent.nodes.prompts import (
 )
 from src.agent.state import AgentState
 from src.findings.models import CandidateCause, Finding
+from src.knowledge import category_for
 from src.tools import ToolResult
 
 __all__ = [
@@ -193,6 +194,10 @@ class Synthesis:
     # reconstruction that quietly omitted it would flag figures the synthesiser
     # had every right to quote.
     citable: tuple[float, ...] = ()
+    # Set when the model's chosen category disagreed with the one the knowledge
+    # base assigns to its own chosen cause. The knowledge base wins; this
+    # records that there was something to win.
+    category_as_written: str | None = None
     response: LLMResponse | None = None
     build_error: str | None = None
 
@@ -312,6 +317,16 @@ def synthesize(
     ]
     resolving = str(payload.get("resolving_measurement") or "").strip() or None
 
+    # The category is a property of the cause, not a second decision.
+    # Asked for anyway, so a disagreement is visible rather than silently
+    # overwritten — the same shape as the critic recording what the model said
+    # beside what the arithmetic found.
+    category_as_written = category
+    if settled and cause:
+        canonical = category_for(cause)
+        if canonical is not None:
+            category = canonical
+
     build_error: str | None = None
     if settled:
         if category not in _CATEGORIES:
@@ -370,6 +385,9 @@ def synthesize(
         evidence=list(payload.get("evidence", [])),
         grounding=grounding,
         citable=citable,
+        category_as_written=(
+            category_as_written if category_as_written != category else None
+        ),
         response=response,
         build_error=build_error,
     )

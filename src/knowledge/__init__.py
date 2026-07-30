@@ -30,6 +30,7 @@ __all__ = [
     "DistinguishingTest",
     "KnowledgeBase",
     "Signature",
+    "category_for",
     "cause_vocabulary",
     "load_knowledge",
 ]
@@ -290,3 +291,22 @@ def cause_vocabulary() -> list[str]:
     drift from the vocabulary the agent is shown.
     """
     return sorted(load_knowledge().signatures)
+
+
+def category_for(cause: str) -> str | None:
+    """Which bucket a cause belongs to. `None` for a cause not in the base.
+
+    The category is a *property of the cause*, written down once in
+    `fault_signatures.yaml`: soiling is `recoverable`, sensor_drift is
+    `not_the_plant`, shading is `fault`. It is a lookup, not a judgement.
+
+    The synthesiser was choosing both independently and could therefore
+    contradict the knowledge base — and did, once in eight cases: the
+    eight-case run scored 0.875 on cause and 0.750 on category, and the whole
+    gap is one answer that named the right cause and filed it in the wrong
+    bucket. That is not a reasoning failure; it is a dictionary lookup done by
+    hand. CLAUDE.md already keeps the LLM out of arithmetic, thresholds,
+    scoring and data scope, and this belongs on that list.
+    """
+    signature = load_knowledge().signatures.get(cause)
+    return str(signature.category) if signature else None

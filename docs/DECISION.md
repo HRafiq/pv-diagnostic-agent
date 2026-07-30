@@ -2592,3 +2592,56 @@ cached run still counts as priced, because it did pay.
 When every run was cached the medians report `None` rather than 0.0. "Free" and
 "not measured" are different claims, and this module has now made that mistake
 twice — once with the v1 targets (DECISION 0065) and once here.
+
+---
+
+## 0081 — The category is a lookup, so stop asking for it (2026-07-30)
+
+The eight-case run scored **0.875 on cause and 0.750 on category**. The whole
+gap is one answer that named the right cause and filed it in the wrong bucket.
+
+That is not a reasoning failure. `fault_signatures.yaml` already assigns a
+category to every cause, and the mapping is a dictionary:
+
+```
+soiling      -> recoverable      sensor_drift  -> not_the_plant
+shading      -> fault            clipping      -> by_design
+```
+
+The synthesiser was choosing both independently, so it could contradict a file
+it had been shown. CLAUDE.md keeps the LLM out of arithmetic, thresholds,
+scoring and data scope; a lookup on a value the model itself just chose belongs
+on that list. `category_for(cause)` now decides it.
+
+**The model is still asked**, and the answer still recorded, as
+`Synthesis.category_as_written` and in the trace. The knowledge base wins, but a
+disagreement is a signal — either the model has misunderstood the taxonomy or
+the taxonomy is wrong — and silently overwriting it would throw that away. Same
+shape as the critic recording what the reviewer said beside what the arithmetic
+found.
+
+---
+
+## 0082 — `explain`, because the console clips the evidence (2026-07-30)
+
+G-004 is the one case the eight-case run still gets wrong: it commits to
+`string_outage` against a ground truth of soiling, having *measured* the soiling
+signature — performance falling 0.00627 per day across five dry stretches, which
+is dust accumulating between rain. Why it preferred the string reading is in the
+trace and was never readable, because `StepPrinter` clips every line to 96
+characters and that is where the sentence ends.
+
+The display is right to clip: it is for watching a run. It is the wrong tool for
+diagnosing one, and there was no other. `eval/runner.py explain G-004` prints one
+attempt in full — the plan's candidate causes and what each would cost to act on,
+every measurement's whole summary, why each unplanned tool was chosen, and the
+final answer with its category, confidence and ungrounded figures.
+
+No API calls: it reads a trace already on disk. It reuses `split_attempts` from
+DECISION 0078, so `--attempt` selects among the runs concatenated into one file
+and the default is the most recent.
+
+The general point, which this project keeps rediscovering: the evaluation
+harness is not only for producing scores. Half the bugs found in the last week —
+the ledger collision, the standing offset, the concatenated traces — were
+invisible until something was built to look at what had already been recorded.

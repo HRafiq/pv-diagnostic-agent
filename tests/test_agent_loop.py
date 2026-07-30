@@ -1637,3 +1637,63 @@ def test_no_review_stays_a_single_pass(ctx: ToolContext, clock: FrozenClock) -> 
     assert out.state.cycle == 0
     assert out.state.verdicts == []
     assert len([s for s in out.steps if s.kind == "plan"]) == 1
+
+
+# ===========================================================================
+# The category is a lookup, not a second decision
+# ===========================================================================
+def test_the_category_comes_from_the_cause(
+    ctx: ToolContext, clock: FrozenClock
+) -> None:
+    """The eight-case run scored 0.875 on cause and 0.750 on category.
+
+    The whole gap was one answer that named the right cause and filed it in the
+    wrong bucket. `fault_signatures.yaml` already says soiling is `recoverable`
+    and sensor_drift is `not_the_plant`; asking the model to pick both
+    independently lets it contradict a file it was shown.
+    """
+    out = run(
+        [a_plan(["compute_temp_corrected_pr"])],
+        [a_call("compute_temp_corrected_pr"), a_stop()],
+        # Right cause, wrong bucket: soiling is `recoverable`, not `fault`.
+        [a_settled_answer(cause="soiling", category="fault")],
+        ctx,
+        clock,
+    )
+    assert out.synthesis is not None
+    assert out.synthesis.cause == "soiling"
+    assert out.synthesis.category == "recoverable"
+    # The disagreement is recorded, not silently swallowed.
+    assert out.synthesis.category_as_written == "fault"
+    assert out.finding is not None and out.finding.category == "recoverable"
+
+
+def test_an_agreeing_category_records_no_disagreement(
+    ctx: ToolContext, clock: FrozenClock
+) -> None:
+    out = run(
+        [a_plan(["compute_temp_corrected_pr"])],
+        [a_call("compute_temp_corrected_pr"), a_stop()],
+        [a_settled_answer(cause="string_outage", category="fault")],
+        ctx,
+        clock,
+    )
+    assert out.synthesis is not None
+    assert out.synthesis.category == "fault"
+    assert out.synthesis.category_as_written is None
+
+
+def test_an_unsettled_answer_has_no_category_to_derive(
+    ctx: ToolContext, clock: FrozenClock
+) -> None:
+    """There is no cause, so there is nothing to look up."""
+    out = run(
+        [a_plan(["compute_temp_corrected_pr"])],
+        [a_call("compute_temp_corrected_pr"), a_stop()],
+        [an_unsettled_answer()],
+        ctx,
+        clock,
+    )
+    assert out.synthesis is not None
+    assert out.synthesis.cause is None
+    assert out.synthesis.category_as_written is None

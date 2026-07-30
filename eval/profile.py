@@ -38,6 +38,7 @@ from src.trace.writer import read_trace
 __all__ = [
     "NodeCost",
     "RunProfile",
+    "explain",
     "profile_run",
     "profile_traces",
     "render",
@@ -317,3 +318,82 @@ def summary(profiles: list[RunProfile]) -> dict[str, Any]:
         "seconds_after_first_cycle": round(sum(s for s, _ in later), 1),
         "usd_after_first_cycle": round(sum(u for _, u in later), 4),
     }
+
+
+def explain(path: Path | str, attempt: int | None = None) -> str:
+    """One attempt, in full, in the order it happened.
+
+    The live display clips every line to the terminal width, which is right for
+    watching a run and wrong for diagnosing one: G-004 committed to
+    `string_outage` on a soiling case, and the sentence that would say why was
+    cut at 96 characters in every log of it. The trace has the whole thing.
+
+    Prints the plan's candidate causes, each measurement's full summary, and the
+    final answer with the evidence it cited — the four things needed to say what
+    the agent believed and what it read.
+    """
+    attempts = split_attempts(list(read_trace(path)))
+    if not attempts:
+        return f"{path} has no steps."
+    index = (attempt or len(attempts)) - 1
+    if not 0 <= index < len(attempts):
+        return (
+            f"{path} holds {len(attempts)} attempt(s); asked for {attempt}. "
+            "Attempts are numbered from 1, and the last is the default."
+        )
+
+    steps = attempts[index]
+    lines = [
+        f"{Path(path).stem}  attempt {index + 1} of {len(attempts)}  "
+        f"({len(steps)} steps)"
+    ]
+    for step in steps:
+        args = step.args if isinstance(step.args, dict) else {}
+        cycle = args.get("cycle", 0)
+
+        if step.kind == "plan":
+            lines.append(f"\n--- cycle {cycle}: PLAN " + "-" * 46)
+            hypotheses = args.get("hypotheses") or []
+            for h in hypotheses if isinstance(hypotheses, list) else []:
+                if isinstance(h, dict):
+                    lines.append(f"  {h.get('id', '?')}  {h.get('cause', '?')}")
+                    if h.get("consequence_if_true"):
+                        lines.append(f"      if true: {h['consequence_if_true']}")
+            planned = args.get("planned_tools") or []
+            if isinstance(planned, list) and planned:
+                lines.append("  plan: " + ", ".join(str(t) for t in planned))
+
+        elif step.kind in ("tool", "adaptive"):
+            mark = "  *" if step.kind == "adaptive" else "   "
+            lines.append(f"{mark} {step.result or ''}")
+            if not step.was_planned and step.reason_for_choosing:
+                lines.append(f"      chosen because: {step.reason_for_choosing}")
+
+        elif step.kind == "retrieval":
+            lines.append(f"    [{step.result or ''}]")
+
+        elif step.kind == "answer":
+            lines.append(f"\n--- cycle {cycle}: ANSWER " + "-" * 44)
+            lines.append(f"  settled: {args.get('settled')}")
+            lines.append(f"  cause: {args.get('cause')}")
+            lines.append(f"  category: {args.get('category')}")
+            if args.get("category_as_written"):
+                lines.append(
+                    f"  (the model wrote category "
+                    f"{args['category_as_written']!r}; the knowledge base "
+                    "assigns the one above to this cause)"
+                )
+            lines.append(f"  confidence: {args.get('confidence')}")
+            if args.get("resolving_measurement"):
+                lines.append(f"  would be resolved by: {args['resolving_measurement']}")
+            if args.get("ungrounded_figures"):
+                lines.append(f"  UNGROUNDED: {args['ungrounded_figures']}")
+            lines.append(f"\n  {step.result or args.get('answer', '')}")
+
+        elif step.kind == "critic":
+            lines.append(f"\n--- cycle {cycle}: REVIEW " + "-" * 44)
+            lines.append(f"  {step.result or args.get('verdict', '')}")
+            if args.get("revision_request"):
+                lines.append(f"  asked for: {args['revision_request']}")
+
+    return "\n".join(lines)

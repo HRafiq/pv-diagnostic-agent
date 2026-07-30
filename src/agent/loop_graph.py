@@ -379,6 +379,7 @@ def build_graph(run: _Run, checkpointer: Any | None = None) -> Any:
                     "recommended_action": synthesis.recommended_action,
                     "answer": synthesis.answer,
                     "ungrounded_figures": list(synthesis.grounding.ungrounded),
+                    "category_as_written": synthesis.category_as_written,
                     "build_error": synthesis.build_error,
                 },
                 result=synthesis.summary or synthesis.answer,

@@ -179,3 +179,102 @@ def test_a_rerun_appended_to_the_same_file_is_split_into_two(tmp_path: Path) -> 
 def test_a_single_attempt_keeps_its_plain_name(tmp_path: Path) -> None:
     write_trace(tmp_path / "INV-G-010.jsonl", a_run(cycles=1))
     assert profile_traces(tmp_path)[0].investigation_id == "INV-G-010"
+
+
+# ===========================================================================
+# Reading one case's reasoning, in full
+# ===========================================================================
+def _a_diagnostic_trace() -> list[dict[str, Any]]:
+    return [
+        {
+            "kind": "plan",
+            "node": "planner",
+            "args": {
+                "cycle": 0,
+                "planned_tools": ["compute_temp_corrected_pr"],
+                "hypotheses": [
+                    {
+                        "id": "H1",
+                        "cause": "soiling",
+                        "consequence_if_true": "schedule a wash",
+                    }
+                ],
+            },
+            "result": "x",
+            "was_planned": True,
+            "step_index": 0,
+            "tokens": 0,
+            "cost_usd": 0.0,
+            "latency_ms": 1,
+        },
+        {
+            "kind": "adaptive",
+            "node": "per_mppt_current_balance",
+            "args": {"cycle": 0},
+            "result": "the lowest share is string 7 at 0.125, unmoved from baseline",
+            "was_planned": False,
+            "reason_for_choosing": "to rule out a failed string",
+            "step_index": 1,
+            "tokens": 0,
+            "cost_usd": 0.0,
+            "latency_ms": 1,
+        },
+        {
+            "kind": "answer",
+            "node": "synthesizer",
+            "args": {
+                "cycle": 0,
+                "settled": True,
+                "cause": "string_outage",
+                "category": "fault",
+                "category_as_written": "recoverable",
+                "confidence": 0.7,
+                "ungrounded_figures": [],
+            },
+            "result": "String 7 carries less current than its neighbours.",
+            "was_planned": True,
+            "step_index": 2,
+            "tokens": 0,
+            "cost_usd": 0.0,
+            "latency_ms": 1,
+        },
+    ]
+
+
+def test_explain_shows_what_the_console_clipped(tmp_path: Path) -> None:
+    """The live display cuts every line to the terminal width.
+
+    That is right for watching a run and wrong for diagnosing one: G-004
+    committed to `string_outage` on a soiling case and the sentence that would
+    say why was cut at 96 characters in every log of it.
+    """
+    from eval.profile import explain
+
+    write_trace(tmp_path / "INV-G-004.jsonl", _a_diagnostic_trace(), renumber=False)
+    report = explain(tmp_path / "INV-G-004.jsonl")
+
+    assert "H1  soiling" in report
+    assert "if true: schedule a wash" in report
+    assert "unmoved from baseline" in report
+    assert "chosen because: to rule out a failed string" in report
+    assert "cause: string_outage" in report
+    assert "String 7 carries less current than its neighbours." in report
+
+
+def test_explain_names_a_category_the_model_disagreed_with(tmp_path: Path) -> None:
+    from eval.profile import explain
+
+    write_trace(tmp_path / "INV-G-004.jsonl", _a_diagnostic_trace(), renumber=False)
+    report = explain(tmp_path / "INV-G-004.jsonl")
+    assert "the model wrote category 'recoverable'" in report
+
+
+def test_explain_defaults_to_the_most_recent_attempt(tmp_path: Path) -> None:
+    from eval.profile import explain
+
+    rows = _a_diagnostic_trace() + numbered(a_run(cycles=1))
+    write_trace(tmp_path / "INV-G-004.jsonl", rows, renumber=False)
+
+    assert "attempt 2 of 2" in explain(tmp_path / "INV-G-004.jsonl")
+    assert "attempt 1 of 2" in explain(tmp_path / "INV-G-004.jsonl", attempt=1)
+    assert "asked for 9" in explain(tmp_path / "INV-G-004.jsonl", attempt=9)
