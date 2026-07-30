@@ -373,11 +373,18 @@ figure meaningless.
 
 Each step is gated: it stops for review before the next one starts.
 
-Both loops ship. `src/agent/loop_plain.py` is the reference implementation;
-`src/agent/loop_graph.py` is the LangGraph port, held to sixteen exact-equality
-tests against it. `docs/LANGGRAPH_TRADEOFF.md` records what the framework
-actually bought — checkpointing, which an 86-case evaluation that dies at case 60
-genuinely wants — and what it cost.
+Both loops ship. `src/agent/loop_plain.py` is the specification;
+`src/agent/loop_graph.py` is the LangGraph port, held to eighteen exact-equality
+tests against it, and is what the runner and the watcher actually import.
+
+`docs/LANGGRAPH_TRADEOFF.md` records what the framework bought and what it cost
+— including a correction to its own headline. It claimed checkpointing as the
+capability that justified the port; there was no checkpointer wired at all, and
+the one now in place is in-memory, so it does not survive the process and a run
+that dies at case 60 still starts again. Surviving that is `--resume`, thirty
+lines of `json.dumps` in the runner. A document written to hold a framework to a
+measured standard had asserted the framework's headline benefit without ever
+exercising it.
 
 ---
 

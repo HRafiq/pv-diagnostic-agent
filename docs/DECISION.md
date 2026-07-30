@@ -2737,3 +2737,59 @@ This is a general hazard in a tool set built to be composed. Each tool is
 individually honest and the composition can still mislead, because a reader
 cannot know which of two disagreeing measurements answers their question unless
 the tools say what question they answer.
+
+---
+
+## 0086 — Correcting DECISION 0019's headline: checkpointing (2026-07-30)
+
+This file is append-only, so DECISION 0019 stands as written. It should be read
+with this next to it, because its central claim was wrong.
+
+0019 decided both loops ship, and gave the reason:
+
+> **checkpointing is what tips it** — an 86-case evaluation that dies at case 60
+> currently starts again from case 1.
+
+Two things are wrong with that.
+
+**There was no checkpointer.** `build_graph` called `graph.compile()` with no
+saver and no thread id. The capability the port was justified by had never been
+wired up, and nothing noticed for as long as nothing imported the port — every
+run this project made used the plain loop until DECISION 0072.
+
+**Wiring one in does not deliver the sentence.** `InMemorySaver` records node
+boundaries *within one investigation* and dies with the process. The failures
+that actually cost cases — an overload at case 6, an exhausted credit balance
+mid-answer — take the interpreter with them. A run that dies at case 60 still
+starts again. What survives it is `eval/runner.py --resume`: one JSON object per
+case, appended as it finishes. Thirty lines, no framework.
+
+Durable within-run resume is reachable — `langgraph-checkpoint-sqlite` is one
+dependency away — but that is a smaller claim than the one made.
+
+**Two costs 0019 could not have seen**, because it was written against a loop
+that had stopped changing:
+
+*Every behaviour change now costs two edits.* Convergence detection, the three
+review modes, the withdrawn commitment, the critic's own history — each written
+twice and kept identical, with the equivalence test as the only thing between
+"ported" and "diverged". On a loop under active change this is the largest cost
+by some distance.
+
+*A dependency's warnings become yours.* LangGraph's checkpoint package emits a
+pending-deprecation notice about a serialiser this project neither constructs
+nor configures, which began appearing above every evaluation run the moment the
+runner imported the graph (DECISION 0077).
+
+**What does not change.** Both loops still ship, and the port is still what
+runs — a second implementation nobody exercises is worse than either choice,
+which is precisely how its own justification went unchecked for so long. And the
+argument for writing the plain loop first is *strengthened*: "did the framework
+buy anything?" became answerable, and the answer was less than the document
+claiming to answer it said.
+
+The uncomfortable part is worth stating plainly. `docs/LANGGRAPH_TRADEOFF.md`
+exists specifically to hold a framework to a measured standard, and it asserted
+the framework's headline benefit without ever exercising it — in a paragraph
+that congratulated the project for not doing exactly that. Writing "measured
+claim rather than assumption" does not make it one.
