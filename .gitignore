@@ -242,3 +242,6 @@ corpus/*.md
 # Anchored: unanchored, this matched `src/findings/` too and kept two modules
 # out of git entirely. tests/test_repo_tracking.py now guards against a repeat.
 /findings/
+# Evaluation journals and run outputs. Anchored to the repo root so a
+# future `src/runs/` module could never be silently dropped.
+/runs/

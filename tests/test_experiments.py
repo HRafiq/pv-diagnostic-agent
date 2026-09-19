@@ -266,7 +266,7 @@ def test_a_failed_case_is_scored_not_fatal(
 
     monkeypatch.setattr(runner, "investigate", flaky)
 
-    scores, predictions = runner.run_agent_engine(cases)
+    _scores, predictions = runner.run_agent_engine(cases)
 
     assert calls == ["G-001", "G-002", "G-003"], "the run stopped at the failure"
     assert len(predictions) == 3, "the failed case must stay in the denominator"
@@ -410,7 +410,7 @@ def test_isolated_failures_do_not_trip_the_breaker(
 
     monkeypatch.setattr(runner, "investigate", every_other)
 
-    scores, predictions = runner.run_agent_engine(cases)
+    _scores, predictions = runner.run_agent_engine(cases)
     assert len(predictions) == 7, "the run should have finished every case"
 
 

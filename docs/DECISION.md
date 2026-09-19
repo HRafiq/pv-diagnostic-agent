@@ -2793,3 +2793,43 @@ exists specifically to hold a framework to a measured standard, and it asserted
 the framework's headline benefit without ever exercising it — in a paragraph
 that congratulated the project for not doing exactly that. Writing "measured
 claim rather than assumption" does not make it one.
+
+---
+
+## 0087 — Charts in the README are generated, not drawn (2026-09-19)
+
+Making the repository public meant the README had to show its results rather
+than describe them. Three ways to get figures into it were on the table.
+
+**Rejected: screenshots.** A PNG is a claim nobody can check. Six months from
+now nothing says whether the bars match the metrics the harness would print
+today, and the repository already carries a rule that the dashboard may not
+reimplement a computation that exists in `src/` — a chart pasted as an image is
+that rule broken in the only place a reader looks first.
+
+**Rejected: matplotlib.** It is not a dependency of this project and adding one
+to draw four bar charts is a poor trade: a ~30 MB install, a lockfile change, a
+CI install cost, and a new import in a repository whose dependency list is
+deliberately short.
+
+**Chosen: `scripts/make_charts.py` writes SVG directly**, from
+`docs/results.json`, which is now the single source of truth for every published
+measurement. Each block in that file carries a `_source` naming the run or
+command the figure came from, so a number in the README can be traced to the
+thing that produced it. The retrieval panel is not read from the file at all —
+it is computed live from the committed corpus through `eval.retrieval.ablation`,
+because that one *can* be recomputed on a clean checkout with no API key, and a
+figure that can be recomputed should be.
+
+Consequences worth recording. The figures are text, so a diff shows what changed
+between two versions of a result. The script is covered by `ruff check .` in CI
+but not by `mypy`, which runs over `src eval simulator dashboard` — a build
+script is not a boundary the type checker is defending. And the backgrounds are
+explicitly light rather than transparent: GitHub renders README images against
+both a white and a dark page, and a transparent SVG with dark ink disappears for
+half the readers.
+
+**Also settled here:** `runs/` is now gitignored, anchored to the repository
+root for the same reason `/findings/` is (DECISION 0040). Evaluation journals
+are traces, and repository hygiene says traces are never committed — the rule
+existed, the pattern implementing it did not.
