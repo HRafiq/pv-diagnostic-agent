@@ -2833,3 +2833,57 @@ half the readers.
 root for the same reason `/findings/` is (DECISION 0040). Evaluation journals
 are traces, and repository hygiene says traces are never committed — the rule
 existed, the pattern implementing it did not.
+
+---
+
+## 0088 — Running the whole thing found two false claims in the docs (2026-09-19)
+
+Before making the repository public the full pipeline was run on a clean
+checkout with no data and no API key: sync, tests, ingest, build, rules
+evaluation, retrieval ablation, watcher, dashboard. It works. Three things are
+worth recording, because two of them are documentation that was simply wrong and
+only running the commands could have shown it.
+
+**The Watcher command printed in `README.md` and `docs/WALKTHROUGH.md` could
+never have worked.** It read `--until 2016-09-01`, and the replay clock starts
+at `2017-02-01` (`config/site_defaults.yaml`), so the command exits 1 with
+"not in the future". It had been in the README since step 9. A reader following
+the instructions would have concluded the Watcher was broken. Corrected to
+`--until 2017-08-01`, which is now a *better* example anyway: it reaches a sweep
+where a detector actually fires, opens a finding, and closes it again two sweeps
+later, so the lifecycle is visible rather than eleven lines of "nothing worth
+investigating".
+
+**The claim about the POA channels was wrong in both documents.** `README.md`
+said the system "exposes three POA channels and only one reads in W/m²; the
+others are ~115× smaller", and `docs/FINDINGS.md` said "two of the three POA
+channels are unusable". Measured from the source CSVs: of
+`irradiance_poa_o_2203`, `_2204` and `_2206`, only 2203 is dead — it peaks near
+11 W/m², about 110× too small. 2204 and 2206 both read 1000–1260 W/m² and track
+each other within a few percent across 2016 and 2017. The resolver is choosing
+between two good sensors and one dead one, not finding a lone survivor. The
+genuinely unusable channel the docs never mentioned is GHI, which reads about 10
+and is left unresolved for exactly this reason.
+
+The shape of the error is worth more than the correction. Both sentences were
+written from the ingest's console output, which lists only what it *rejected* —
+a plausible channel that simply is not chosen leaves no trace there. Reading a
+log that reports failures and concluding something about the successes is how a
+detail nobody would invent ends up being wrong in two places at once.
+
+**What was verified, so it can be cited without re-deriving.** The rules
+baseline reproduces its published held-back figures exactly on a fresh ingest —
+macro-F1 0.469, false alarms 0.056, correct abstention 0.000, missed faults
+0.438. The retrieval ablation reproduces its published gaps: hybrid 0.7194 to
+0.7284 with the reranker, and 0.6259 to 0.7194 for fusion over the best single
+retriever. Combiner 7 averages a 0.127 share against an even 0.143 over 29,627
+daylight intervals, which is the 11% that DECISION 0085 is about.
+
+**One observation, deliberately not changed.** `meets_v1_targets` tests
+`abs(gap) <= 0.10`, so the rules engine — which is hand-written and cannot be
+tuned on a split — is reported as failing `overfitting_gap_at_most_0.10` on a
+gap of −0.123, where held-back scores *better* than tuning. The absolute value
+is the right check (splits disagreeing by that much is worth knowing either
+way), but the label is misleading in the negative direction. Left as is rather
+than renamed on the eve of publishing; noted here so the next reader of that
+FAIL knows what it means.
