@@ -507,7 +507,7 @@ To fill all three from nothing:
 uv run python -m src.data.cli ingest --system 4902 --years 2016 2017
 
 # the Watcher on the rules engine — no API key, finds the real 2016 gap
-uv run python watcher.py run --until 2016-09-01 --step 14D --engine rules
+uv run python watcher.py run --until 2017-08-01 --step 14D --engine rules
 
 # any agent run writes traces the Investigate tab replays
 uv run python -m eval.runner run --engine agent --split tuning --only G-017 \

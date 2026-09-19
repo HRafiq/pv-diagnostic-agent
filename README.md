@@ -122,6 +122,23 @@ key.
 > [`docs/results.json`](docs/results.json), which names the source of each
 > measurement. The retrieval chart is computed live from the committed corpus.
 
+### The dashboard
+
+![The plant view](docs/img/dashboard_plant.png)
+
+A real render against the ingested NIST 4902 record — not a mockup. Every number
+and every chart on this page is produced by calling `src/`: the performance
+ratio tile is `physics.compute_pr()`, the same function the agent's tool node
+calls, which is what stops the dashboard and the agent from ever disagreeing.
+The per-string panel is the one worth looking at. Seven combiners on one array
+see the same sunlight, so an even split would be 0.143 — and on this plant they
+are *not* even: combiner 7 averages 0.127 against that 0.143, about 11% low,
+across some 30,000 daylight intervals spanning both years. That is a permanent
+characteristic of the plant, not a fault — and two tools that measured against
+the theoretical 1/7 rather than against this plant's own history reported it as
+a deficit on every case they touched. Correcting them is what took false alarms
+on look-alikes to zero.
+
 ---
 
 ## How an investigation runs
@@ -262,7 +279,7 @@ uv run python -m src.data.cli ingest --system 4902 --years 2016 2017
 uv run python -m eval.runner build                 # 86 golden cases
 uv run python -m eval.runner run --engine rules --split both
 uv run python -m eval.runner retrieval             # the retrieval ablation
-uv run python watcher.py run --until 2016-09-01 --step 14D --engine rules
+uv run python watcher.py run --until 2017-08-01 --step 14D --engine rules
 uv run uvicorn dashboard.app:app --reload          # http://127.0.0.1:8000
 uv run python scripts/make_charts.py               # the figures above
 ```
@@ -313,9 +330,12 @@ injecting at the physics layer rather than the signature layer matters. Three
 things the ingest does that are easy to get wrong:
 
 - **Channel resolution is by physical plausibility, not name.** This system
-  exposes three POA channels and only one reads in W/m²; the others are ~115×
-  smaller. Picking on name alone makes every performance ratio wrong by that
-  factor while still looking plausible.
+  exposes three POA channels, and one of them peaks near 11 W/m² — about 110×
+  too small to be irradiance. The GHI channel is the same, which is why it is
+  left unresolved rather than used. Picking on name alone makes every
+  performance ratio wrong by that factor while still looking plausible, so each
+  candidate is scored against what the quantity can physically be, and every
+  rejection and its reason goes into the manifest.
 - **The logger's timezone is recovered, not assumed.** Every half-hour offset is
   scored against a modelled clear-sky curve. NIST 4902 came back UTC−5 at
   r = 0.997 — Eastern *Standard* Time year round, no daylight saving.

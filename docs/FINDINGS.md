@@ -79,8 +79,14 @@ UTC−5 at r = 0.9972, beating the runner-up by 0.026. Nothing in the metadata
 says so. Assuming UTC would have put every time-of-day measurement five hours
 out, which is the difference between a morning shadow and an afternoon one.
 
-**Two of the three POA channels are unusable.** `irradiance_poa_o_2203` reads a
-maximum of 12.38 where the working channel reads 1360 — a factor of 115.
+**One of the three POA channels is unusable, and so is the GHI channel.**
+`irradiance_poa_o_2203` reads a maximum of 12.38 where the chosen channel reads
+1360 — about 110× too small. The remaining two POA channels are both real:
+`irradiance_poa_o_2204` and `irradiance_poa_o_2206` track each other within a
+few percent across 2016 and 2017, so the resolver is choosing between two good
+sensors and one dead one rather than finding the only survivor. `ghi_wm2` is
+left unresolved because its channel reads about 10 as well.
+
 Selecting on name alone makes every performance ratio wrong by that factor while
 still looking plausible. Channel resolution is done on physical plausibility for
 this reason, and it also rejected a wind channel reading 292 m/s.
