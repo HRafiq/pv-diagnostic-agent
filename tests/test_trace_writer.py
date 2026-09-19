@@ -58,7 +58,7 @@ def test_path_traversal_in_the_id_is_rejected(tmp_path: Path) -> None:
 def test_corrupt_line_names_the_file_and_line(tmp_path: Path) -> None:
     path = tmp_path / "bad.jsonl"
     path.write_text('{"kind": "plan", "node": "planner", "was_planned": true}\nnope\n')
-    with pytest.raises(ValueError, match="bad.jsonl:2"):
+    with pytest.raises(ValueError, match=r"bad\.jsonl:2"):
         list(read_trace(path))
 
 

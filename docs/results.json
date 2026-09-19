@@ -1,0 +1,36 @@
+{
+  "_README": "Published measurements, one place. scripts/make_charts.py reads this to build docs/img/*.svg, so a figure cannot drift from the number it claims to show. Every block names where it came from.",
+
+  "rules_baseline": {
+    "_source": "docs/FINDINGS.md — 43 cases per split, no API key needed, bitwise reproducible",
+    "tuning":   {"macro_f1": 0.345, "false_alarm_rate": 0.056, "correct_abstention_rate": 0.000, "missed_fault_rate": 0.375},
+    "heldback": {"macro_f1": 0.469, "false_alarm_rate": 0.056, "correct_abstention_rate": 0.000, "missed_fault_rate": 0.438}
+  },
+
+  "agent_eight_tuning_cases": {
+    "_source": "runs/checks8.json and runs/checks8b.json — eight tuning cases, --checks-only",
+    "_caveat": "NOT a score. A subset; the tools were changed in response to these eight failing; and only one of the two improvements is attributable.",
+    "before": {"macro_f1": 0.493, "cause_accuracy": 0.625, "false_alarm_rate": 0.500, "correct_abstention_rate": 1.000, "missed_fault_rate": 0.000},
+    "after":  {"macro_f1": 0.700, "cause_accuracy": 0.875, "false_alarm_rate": 0.000, "correct_abstention_rate": 1.000, "missed_fault_rate": 0.000}
+  },
+
+  "targets": {
+    "_source": "handoff brief 5.6 — assessed on the held-back split only",
+    "false_alarm_rate_at_most": 0.15,
+    "correct_abstention_at_least": 0.70,
+    "macro_f1_at_least": 0.75
+  },
+
+  "cost_latency": {
+    "_source": "eval/runner.py run summaries; medians over the eight cases",
+    "first_working_runs": {"median_usd": 1.006, "median_seconds": 574},
+    "current":            {"median_usd": 0.361, "median_seconds": 196}
+  },
+
+  "where_the_time_goes": {
+    "_source": "eval/runner.py profile — 13 timed runs, 13625s and $21.87 total, read off trace files",
+    "_note": "'router + measure' is the LLM turn that chose each measurement. The measurements are pure functions and take milliseconds, so none of this is the physics. Review is absent because its cost was not written to the tape until after these runs.",
+    "shares": {"synthesiser": 50.2, "planner": 22.4, "router + measure": 17.8, "look up": 9.7},
+    "spent_after_cycle_one_pct": 48
+  }
+}
